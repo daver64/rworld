@@ -239,7 +239,9 @@ enum class DisplayMode {
     IRON,
     OIL,
     INSOLATION,
-    VEGETATION
+    VEGETATION,
+    SOIL_FERTILITY,
+    PRESSURE
 };
 
 #ifdef USE_SDL2_TTF
@@ -413,6 +415,7 @@ struct ViewState {
     float current_time = 12.0f;   // Time of day in hours (0-24)
     bool time_paused = true;      // Whether time advances automatically
     float time_speed = 1.0f;      // Time speed multiplier (1.0 = normal, 10.0 = 10x faster)
+    bool show_info = false;       // Whether to show info panel (toggle with I key)
     
     // Convert screen coordinates to world coordinates
     void screen_to_world(int screen_x, int screen_y, int width, int height, 
@@ -602,6 +605,72 @@ void render_world_map(SDL_Renderer* renderer, const World& world,
                     }
                     break;
                 }
+                
+                case DisplayMode::SOIL_FERTILITY: {
+                    // Show soil fertility
+                    float height = world.get_terrain_height(lon, lat, view.zoom);
+                    float altitude = std::max(height, 0.0f);
+                    
+                    if (height <= 0.0f) {
+                        // Ocean - blue
+                        color = get_height_color(height);
+                    } else {
+                        float fertility = world.get_soil_fertility(lon, lat, altitude);
+                        
+                        // Color scale from red (infertile) through yellow to green (fertile)
+                        if (fertility < 0.3f) {
+                            // Red to orange (poor)
+                            uint8_t g = static_cast<uint8_t>(fertility * 255 / 0.3f);
+                            color = {200, g, 0};
+                        } else if (fertility < 0.6f) {
+                            // Orange to yellow (moderate)
+                            float t = (fertility - 0.3f) / 0.3f;
+                            uint8_t r = static_cast<uint8_t>(200 - t * 50);
+                            color = {r, 200, 0};
+                        } else {
+                            // Yellow to green (good to excellent)
+                            float t = (fertility - 0.6f) / 0.4f;
+                            uint8_t r = static_cast<uint8_t>(150 * (1.0f - t));
+                            uint8_t g = static_cast<uint8_t>(200 - t * 50);
+                            color = {r, g, 50};
+                        }
+                    }
+                    break;
+                }
+                
+                case DisplayMode::PRESSURE: {
+                    // Show pressure systems and storm fronts
+                    float height = world.get_terrain_height(lon, lat, view.zoom);
+                    float pressure = world.get_pressure_at_location(lon, lat, 0.0f, view.current_time);
+                    bool is_front = world.is_storm_front(lon, lat, view.current_time);
+                    
+                    if (height <= 0.0f) {
+                        // Ocean - base blue, modulated by pressure
+                        int blue_mod = static_cast<int>((pressure - 1000.0f) * 2.0f);
+                        uint8_t g = static_cast<uint8_t>(std::clamp(50 + blue_mod, 0, 255));
+                        uint8_t b = static_cast<uint8_t>(std::clamp(150 + blue_mod, 0, 255));
+                        color = {30, g, b};
+                    } else {
+                        // Land - color coded by pressure
+                        if (is_front) {
+                            // Storm fronts - bright red/orange
+                            color = {255, 100, 0};
+                        } else if (pressure > 1020.0f) {
+                            // High pressure - blue (clear skies)
+                            uint8_t intensity = static_cast<uint8_t>(std::min(255.0f, 150 + (pressure - 1020.0f) * 3.0f));
+                            color = {100, 150, intensity};
+                        } else if (pressure < 1000.0f) {
+                            // Low pressure - red (storms)
+                            uint8_t intensity = static_cast<uint8_t>(std::min(255.0f, 150 + (1000.0f - pressure) * 3.0f));
+                            color = {intensity, 100, 100};
+                        } else {
+                            // Normal pressure - white/gray
+                            uint8_t gray = static_cast<uint8_t>(150 + (pressure - 1010.0f) * 5.0f);
+                            color = {gray, gray, gray};
+                        }
+                    }
+                    break;
+                }
             }
             
             SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
@@ -675,9 +744,9 @@ void render_info_panel(SDL_Renderer* renderer, const World& world,
         text_renderer->draw_text(renderer, buffer, 20, text_y, gray);
         text_y += 20;
         
-        // Pressure
-        float pressure = world.get_air_pressure(lon, lat, altitude);
-        snprintf(buffer, sizeof(buffer), "Air Pressure: %.1f hPa", pressure);
+        // Air Pressure (basic, altitude-based)
+        float air_pressure = world.get_air_pressure(lon, lat, altitude);
+        snprintf(buffer, sizeof(buffer), "Air Pressure: %.1f hPa", air_pressure);
         text_renderer->draw_text(renderer, buffer, 20, text_y, gray);
         text_y += 20;
         
@@ -802,6 +871,44 @@ void render_info_panel(SDL_Renderer* renderer, const World& world,
         if (veg > 0.01f) {
             snprintf(buffer, sizeof(buffer), "Vegetation: %d%%", static_cast<int>(veg * 100));
             text_renderer->draw_text(renderer, buffer, 20, text_y, SDL_Color{100, 200, 100, 255});
+            text_y += 20;
+        }
+        
+        // Soil information (only for land)
+        if (terrain_height > 0.0f) {
+            rworld::SoilType soil = world.get_soil_type(lon, lat, altitude);
+            float fertility = world.get_soil_fertility(lon, lat, altitude);
+            float ph = world.get_soil_ph(lon, lat, altitude);
+            
+            snprintf(buffer, sizeof(buffer), "Soil: %s (pH %.1f)", rworld::soil_to_string(soil), ph);
+            text_renderer->draw_text(renderer, buffer, 20, text_y, SDL_Color{139, 90, 43, 255});
+            text_y += 20;
+            
+            snprintf(buffer, sizeof(buffer), "Fertility: %d%%", static_cast<int>(fertility * 100));
+            RGB fert_color;
+            if (fertility > 0.7f) fert_color = {50, 200, 50};
+            else if (fertility > 0.4f) fert_color = {200, 200, 50};
+            else fert_color = {200, 100, 50};
+            text_renderer->draw_text(renderer, buffer, 20, text_y, SDL_Color{fert_color.r, fert_color.g, fert_color.b, 255});
+            text_y += 20;
+        }
+        
+        // Pressure system information
+        float pressure = world.get_pressure_at_location(lon, lat, altitude, view.current_time);
+        float gradient = world.get_pressure_gradient(lon, lat, view.current_time);
+        bool is_front = world.is_storm_front(lon, lat, view.current_time);
+        
+        snprintf(buffer, sizeof(buffer), "Pressure: %.1f mb", pressure);
+        SDL_Color pressure_color = {200, 200, 200, 255};
+        if (pressure > 1020.0f) pressure_color = {100, 150, 255, 255}; // High - blue
+        else if (pressure < 1000.0f) pressure_color = {255, 100, 100, 255}; // Low - red
+        text_renderer->draw_text(renderer, buffer, 20, text_y, pressure_color);
+        text_y += 20;
+        
+        if (is_front) {
+            snprintf(buffer, sizeof(buffer), "STORM FRONT! (grad: %.1f)", gradient);
+            text_renderer->draw_text(renderer, buffer, 20, text_y, SDL_Color{255, 100, 0, 255});
+            text_y += 20;
         }
     } else
 #endif
@@ -860,6 +967,8 @@ void render_info_panel(SDL_Renderer* renderer, const World& world,
             case DisplayMode::OIL: mode_text = "Mode: Oil (9)"; break;
             case DisplayMode::INSOLATION: mode_text = "Mode: Insolation (0)"; break;
             case DisplayMode::VEGETATION: mode_text = "Mode: Vegetation (V)"; break;
+            case DisplayMode::SOIL_FERTILITY: mode_text = "Mode: Soil Fertility (F)"; break;
+            case DisplayMode::PRESSURE: mode_text = "Mode: Pressure Systems (P)"; break;
         }
         text_renderer->draw_text(renderer, mode_text, 20, map_height - 33, white);
     }
@@ -920,6 +1029,9 @@ void run_sdl_demo(World& world) {
     std::cout << "  9 - Show Oil Deposits\n";
     std::cout << "  0 - Show Insolation (Day/Night)\n";
     std::cout << "  V - Show Vegetation Density\n";
+    std::cout << "  F - Show Soil Fertility\n";
+    std::cout << "  P - Show Pressure Systems\n";
+    std::cout << "  I - Toggle Info Panel (OFF by default)\n";
     std::cout << "  < / > - Change season (shift+comma/period)\n";
     std::cout << "  SPACE - Pause/Resume time\n";
     std::cout << "  + / - - Increase/Decrease time speed\n";
@@ -927,7 +1039,6 @@ void run_sdl_demo(World& world) {
     std::cout << "  R - Regenerate world (new seed)\n";
     std::cout << "  Mouse Wheel - Zoom in/out at cursor position\n";
     std::cout << "  ESC/Q - Quit\n";
-    std::cout << "  Mouse - Hover to see location details\n";
     std::cout << "\nGenerating world map...\n";
     
     WorldConfig config = world.get_config();
@@ -1004,6 +1115,20 @@ void run_sdl_demo(World& world) {
                         current_mode = DisplayMode::VEGETATION;
                         need_redraw = true;
                         std::cout << "Display mode: Vegetation Density\n";
+                        break;
+                    case SDLK_f:
+                        current_mode = DisplayMode::SOIL_FERTILITY;
+                        need_redraw = true;
+                        std::cout << "Display mode: Soil Fertility\n";
+                        break;
+                    case SDLK_p:
+                        current_mode = DisplayMode::PRESSURE;
+                        need_redraw = true;
+                        std::cout << "Display mode: Pressure Systems\n";
+                        break;
+                    case SDLK_i:
+                        view_state.show_info = !view_state.show_info;
+                        std::cout << "Info panel: " << (view_state.show_info ? "ON" : "OFF") << "\n";
                         break;
                     case SDLK_COMMA: // < key - previous season (shift+comma)
                     case SDLK_PERIOD: { // > key - next season (shift+period)
@@ -1121,13 +1246,15 @@ void run_sdl_demo(World& world) {
             std::cout << "World map rendered.\n";
         }
         
-        // Always redraw UI overlay
-        render_info_panel(renderer, world, mouse_x, mouse_y, 
-                         WINDOW_WIDTH, WINDOW_HEIGHT, current_mode, view_state
+        // Draw info panel overlay if enabled
+        if (view_state.show_info) {
+            render_info_panel(renderer, world, mouse_x, mouse_y, 
+                             WINDOW_WIDTH, WINDOW_HEIGHT, current_mode, view_state
 #ifdef USE_SDL2_TTF
-                         , has_text ? &text_renderer : nullptr
+                             , has_text ? &text_renderer : nullptr
 #endif
-                         );
+                             );
+        }
         
         SDL_RenderPresent(renderer);
         

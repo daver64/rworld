@@ -20,6 +20,7 @@ public:
     FastNoiseLite oil_noise;
     FastNoiseLite cloud_noise;
     FastNoiseLite weather_noise; // For temporal weather variations
+    FastNoiseLite pressure_noise; // For pressure systems and storm fronts
     
     explicit Impl(const WorldConfig& cfg) : config(cfg) {
         initialize_noise_generators();
@@ -102,6 +103,13 @@ public:
         weather_noise.SetFractalOctaves(2);
         weather_noise.SetFrequency(0.008f * config.world_scale); // Coarser for broad weather systems
         weather_noise.SetSeed(static_cast<int>(config.seed + 6000));
+        
+        // Pressure system noise - creates high/low pressure centers
+        pressure_noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        pressure_noise.SetFractalType(FastNoiseLite::FractalType_FBm);
+        pressure_noise.SetFractalOctaves(3);
+        pressure_noise.SetFrequency(0.006f * config.world_scale); // Large-scale weather systems
+        pressure_noise.SetSeed(static_cast<int>(config.seed + 7000));
     }
     
     // Convert geographic coordinates to world space for noise sampling
@@ -235,11 +243,17 @@ public:
         coal_noise_value = (coal_noise_value + 1.0f) * 0.5f; // 0-1
         
         // Coal more likely in areas with:
-        // - Moderate elevation (50-1200m - ancient swamps and forests)
+        // - Moderate elevation (0-1500m - ancient swamps and forests)
         float elevation_factor = 0.0f;
-        if (terrain_height >= 50.0f && terrain_height <= 1200.0f) {
-            elevation_factor = 1.0f - std::abs(terrain_height - 500.0f) / 700.0f;
-            elevation_factor = std::max(0.3f, elevation_factor); // Minimum factor of 0.3
+        if (terrain_height >= 0.0f && terrain_height <= 1500.0f) {
+            // Broad plateau from 0-1000m with gentle falloff
+            if (terrain_height <= 1000.0f) {
+                elevation_factor = 0.7f + (terrain_height / 2000.0f) * 0.3f; // 0.7 to 0.85
+            } else {
+                // Gentle decline above 1000m
+                elevation_factor = 0.85f - ((terrain_height - 1000.0f) / 1000.0f) * 0.5f;
+                elevation_factor = std::max(0.35f, elevation_factor);
+            }
         }
         
         // - High historical precipitation (ancient forests/swamps)
@@ -247,11 +261,20 @@ public:
         float precip = get_precipitation(longitude, latitude, altitude);
         float moisture_factor = std::clamp(precip / 1500.0f, 0.2f, 1.0f); // Minimum 0.2
         
-        // - Temperate to tropical latitudes
-        float lat_factor = 1.0f - std::abs(latitude) / 90.0f; // Higher at equator
+        // - Temperate to subtropical latitudes (20-60°) are best
+        // Major coal deposits formed in Carboniferous period temperate swamps
+        float abs_lat = std::abs(latitude);
+        float lat_factor = 1.0f;
+        if (abs_lat < 20.0f) {
+            lat_factor = 0.7f + (abs_lat / 20.0f) * 0.3f; // 0.7-1.0 in tropics
+        } else if (abs_lat <= 60.0f) {
+            lat_factor = 1.0f; // Full factor in temperate zones
+        } else {
+            lat_factor = std::max(0.4f, 1.0f - (abs_lat - 60.0f) / 30.0f); // 1.0-0.4 toward poles
+        }
         
         // Boost coal concentration overall
-        float coal = coal_noise_value * elevation_factor * moisture_factor * (0.5f + lat_factor * 0.5f);
+        float coal = coal_noise_value * elevation_factor * moisture_factor * lat_factor;
         coal = std::pow(coal, 0.7f); // Make deposits more concentrated
         return std::clamp(coal * 1.3f, 0.0f, 1.0f);
     }
@@ -292,9 +315,9 @@ public:
     float get_oil_deposit(float longitude, float latitude) const {
         float terrain_height = get_terrain_height(longitude, latitude);
         
-        // Oil forms in sedimentary basins - prefer low elevations and ancient ocean margins
-        // Can be on land or shallow ocean
-        if (terrain_height < -1000.0f || terrain_height > 1200.0f) {
+        // Oil forms in sedimentary basins - prefer low to moderate elevations on land
+        // Rare in deep ocean, focus on sedimentary basins on continents
+        if (terrain_height < -200.0f || terrain_height > 1500.0f) {
             return 0.0f;
         }
         
@@ -306,21 +329,29 @@ public:
         oil_noise_value = (oil_noise_value + 1.0f) * 0.5f; // 0-1
         
         // Oil more likely in:
-        // - Sedimentary basins (valleys, lowlands, coastal areas)
+        // - Sedimentary basins (lowlands, valleys, coastal plains)
         float elevation_factor = 0.0f;
-        if (terrain_height >= -200.0f && terrain_height <= 800.0f) {
-            elevation_factor = 1.0f - std::abs(terrain_height - 200.0f) / 600.0f;
-            elevation_factor = std::max(0.3f, elevation_factor); // Minimum factor
+        if (terrain_height >= 0.0f && terrain_height <= 1200.0f) {
+            // Favor moderate elevations (100-800m) - inland sedimentary basins
+            if (terrain_height < 100.0f) {
+                elevation_factor = 0.5f; // Coastal areas - some deposits
+            } else if (terrain_height <= 800.0f) {
+                elevation_factor = 1.0f; // Sweet spot for sedimentary basins
+            } else {
+                elevation_factor = 1.0f - (terrain_height - 800.0f) / 400.0f;
+                elevation_factor = std::max(0.3f, elevation_factor);
+            }
+        } else if (terrain_height >= -200.0f && terrain_height < 0.0f) {
+            // Shallow ocean - offshore deposits (less common)
+            elevation_factor = 0.4f;
         }
         
-        // - Areas that were ancient ocean (coastal/low areas)
-        float coastal_factor = terrain_height < 400.0f ? 1.3f : 0.9f;
-        
         // - Cellular pattern creates basin-like deposits
-        oil_noise_value = std::pow(oil_noise_value, 1.2f); // Make deposits somewhat concentrated but not too rare
+        // Make deposits concentrated but visible
+        oil_noise_value = std::pow(oil_noise_value, 1.3f); // Less concentrated for more abundance
         
-        float oil = oil_noise_value * elevation_factor * coastal_factor;
-        return std::clamp(oil * 1.4f, 0.0f, 1.0f);
+        float oil = oil_noise_value * elevation_factor;
+        return std::clamp(oil * 1.2f, 0.0f, 1.0f);
     }
     
     float get_solar_angle(float longitude, float latitude, float current_time) const {
@@ -526,6 +557,297 @@ public:
         base_density *= (0.85f + noise * 0.3f);
         
         return std::clamp(base_density, 0.0f, 1.0f);
+    }
+    
+    SoilType get_soil_type(float longitude, float latitude, float altitude) const {
+        // No soil underwater, on ice, or extreme mountains
+        if (altitude < 0.0f) {
+            return SoilType::NONE;
+        }
+        if (altitude > 5000.0f) {
+            return SoilType::ROCKY;
+        }
+        
+        float temp = get_temperature(longitude, latitude, altitude);
+        float precip = get_precipitation(longitude, latitude, altitude);
+        BiomeType biome = classify_biome(longitude, latitude, altitude);
+        
+        // Ice/Snow - permafrost
+        if (biome == BiomeType::ICE || biome == BiomeType::SNOW || 
+            biome == BiomeType::MOUNTAIN_PEAK || temp < -5.0f) {
+            return SoilType::PERMAFROST;
+        }
+        
+        // Wetlands and rainforests - peat
+        if (precip > 2000.0f && altitude < 100.0f) {
+            return SoilType::PEAT;
+        }
+        
+        // Mountains and high altitude - rocky
+        if (altitude > 3000.0f || biome == BiomeType::MOUNTAIN_TUNDRA || 
+            biome == BiomeType::MOUNTAIN_PEAK) {
+            return SoilType::ROCKY;
+        }
+        
+        // Deserts - sandy
+        if (biome == BiomeType::DESERT || biome == BiomeType::COLD_DESERT) {
+            return SoilType::SAND;
+        }
+        
+        // Grasslands and temperate zones - loam (best soil)
+        if (biome == BiomeType::GRASSLAND || biome == BiomeType::SAVANNA) {
+            if (precip > 500.0f && precip < 1500.0f) {
+                return SoilType::LOAM;
+            }
+        }
+        
+        // High precipitation temperate - clay
+        if (precip > 1200.0f && temp > 5.0f && temp < 25.0f) {
+            return SoilType::CLAY;
+        }
+        
+        // Moderate precipitation - silt
+        if (precip > 600.0f && precip < 1200.0f) {
+            return SoilType::SILT;
+        }
+        
+        // Default to sand for dry areas
+        return SoilType::SAND;
+    }
+    
+    float get_soil_fertility(float longitude, float latitude, float altitude) const {
+        SoilType soil = get_soil_type(longitude, latitude, altitude);
+        float temp = get_temperature(longitude, latitude, altitude);
+        float precip = get_precipitation(longitude, latitude, altitude);
+        float vegetation = get_vegetation_density(longitude, latitude, altitude);
+        
+        // Base fertility by soil type
+        float base_fertility = 0.0f;
+        switch (soil) {
+            case SoilType::LOAM:
+                base_fertility = 0.95f; // Ideal agricultural soil
+                break;
+            case SoilType::SILT:
+                base_fertility = 0.75f; // Good fertility
+                break;
+            case SoilType::CLAY:
+                base_fertility = 0.65f; // Nutrient-rich but poor drainage
+                break;
+            case SoilType::PEAT:
+                base_fertility = 0.55f; // Organic but acidic
+                break;
+            case SoilType::SAND:
+                base_fertility = 0.30f; // Poor nutrients and water retention
+                break;
+            case SoilType::ROCKY:
+                base_fertility = 0.10f; // Very poor
+                break;
+            case SoilType::PERMAFROST:
+                base_fertility = 0.05f; // Frozen, minimal growth
+                break;
+            case SoilType::NONE:
+                base_fertility = 0.0f; // Water or ice
+                break;
+        }
+        
+        // Organic matter from vegetation increases fertility
+        float organic_bonus = vegetation * 0.15f;
+        base_fertility += organic_bonus;
+        
+        // Temperature affects decomposition and nutrient cycling
+        float temp_factor = 1.0f;
+        if (temp < 0.0f) {
+            temp_factor = 0.3f; // Frozen = slow decomposition
+        } else if (temp < 10.0f) {
+            temp_factor = 0.6f; // Cool = slow decomposition
+        } else if (temp > 30.0f) {
+            temp_factor = 0.8f; // Very hot = rapid decomposition (nutrients lost)
+        }
+        base_fertility *= temp_factor;
+        
+        // Precipitation affects leaching
+        // Too much washes away nutrients, too little limits growth
+        float precip_factor = 1.0f;
+        if (precip < 300.0f) {
+            precip_factor = 0.4f; // Too dry
+        } else if (precip > 2500.0f) {
+            precip_factor = 0.7f; // Leached nutrients
+        } else if (precip > 500.0f && precip < 1200.0f) {
+            precip_factor = 1.1f; // Optimal range
+        }
+        base_fertility *= precip_factor;
+        
+        // Slope/altitude affects erosion (higher = more erosion = less fertile)
+        if (altitude > 1500.0f) {
+            base_fertility *= 0.7f;
+        } else if (altitude > 500.0f) {
+            base_fertility *= 0.85f;
+        } else if (altitude < 50.0f && altitude > 0.0f) {
+            base_fertility *= 1.1f; // River valleys and lowlands accumulate nutrients
+        }
+        
+        return std::clamp(base_fertility, 0.0f, 1.0f);
+    }
+    
+    float get_soil_ph(float longitude, float latitude, float altitude) const {
+        SoilType soil = get_soil_type(longitude, latitude, altitude);
+        float precip = get_precipitation(longitude, latitude, altitude);
+        BiomeType biome = classify_biome(longitude, latitude, altitude);
+        
+        // Base pH by soil type
+        float base_ph = 7.0f; // Neutral
+        
+        switch (soil) {
+            case SoilType::PEAT:
+                base_ph = 4.5f; // Acidic
+                break;
+            case SoilType::SAND:
+                base_ph = 6.5f; // Slightly acidic
+                break;
+            case SoilType::CLAY:
+                base_ph = 7.2f; // Slightly alkaline
+                break;
+            case SoilType::SILT:
+                base_ph = 6.8f; // Near neutral
+                break;
+            case SoilType::LOAM:
+                base_ph = 6.5f; // Slightly acidic (ideal for most plants)
+                break;
+            case SoilType::ROCKY:
+                base_ph = 7.5f; // Alkaline
+                break;
+            case SoilType::PERMAFROST:
+                base_ph = 6.0f; // Acidic
+                break;
+            case SoilType::NONE:
+                base_ph = 7.0f; // Water is neutral
+                break;
+        }
+        
+        // High precipitation leaches bases, making soil more acidic
+        if (precip > 1500.0f) {
+            base_ph -= 0.8f;
+        } else if (precip > 1000.0f) {
+            base_ph -= 0.4f;
+        }
+        
+        // Desert soils tend to be alkaline (less leaching)
+        if (biome == BiomeType::DESERT || biome == BiomeType::COLD_DESERT) {
+            base_ph += 0.5f;
+        }
+        
+        // Forests make soil more acidic (leaf litter)
+        if (biome == BiomeType::TAIGA || biome == BiomeType::TEMPERATE_DECIDUOUS_FOREST ||
+            biome == BiomeType::TROPICAL_RAINFOREST) {
+            base_ph -= 0.3f;
+        }
+        
+        return std::clamp(base_ph, 4.0f, 9.0f);
+    }
+    
+    float get_organic_matter(float longitude, float latitude, float altitude) const {
+        SoilType soil = get_soil_type(longitude, latitude, altitude);
+        float vegetation = get_vegetation_density(longitude, latitude, altitude);
+        float temp = get_temperature(longitude, latitude, altitude);
+        float precip = get_precipitation(longitude, latitude, altitude);
+        
+        // Base organic matter by soil type
+        float base_organic = 0.0f;
+        switch (soil) {
+            case SoilType::PEAT:
+                base_organic = 0.95f; // Mostly organic
+                break;
+            case SoilType::LOAM:
+                base_organic = 0.40f; // Good organic content
+                break;
+            case SoilType::SILT:
+                base_organic = 0.30f; // Moderate organic content
+                break;
+            case SoilType::CLAY:
+                base_organic = 0.25f; // Retains some organic matter
+                break;
+            case SoilType::SAND:
+                base_organic = 0.10f; // Poor retention
+                break;
+            case SoilType::ROCKY:
+            case SoilType::PERMAFROST:
+                base_organic = 0.05f; // Very little
+                break;
+            case SoilType::NONE:
+                base_organic = 0.0f;
+                break;
+        }
+        
+        // Vegetation adds organic matter
+        base_organic += vegetation * 0.4f;
+        
+        // Cold temperatures slow decomposition (preserves organic matter)
+        if (temp < 0.0f) {
+            base_organic *= 1.5f;
+        } else if (temp < 10.0f) {
+            base_organic *= 1.2f;
+        } else if (temp > 25.0f) {
+            base_organic *= 0.7f; // Rapid decomposition
+        }
+        
+        // Moisture helps accumulate organic matter
+        if (precip > 1500.0f) {
+            base_organic *= 1.2f;
+        } else if (precip < 500.0f) {
+            base_organic *= 0.7f;
+        }
+        
+        return std::clamp(base_organic, 0.0f, 1.0f);
+    }
+    
+    float get_pressure_at_location(float longitude, float latitude, float altitude, float current_time) const {
+        // Standard atmospheric pressure at altitude
+        float altitude_pressure = get_air_pressure(altitude);
+        
+        // Add pressure variations from weather systems
+        float x, y, z;
+        geo_to_world(longitude, latitude, x, y, z);
+        
+        // Move pressure systems with time
+        float time_scaled = current_time * 0.1f;
+        float pressure_variation = pressure_noise.GetNoise(x, y, z + time_scaled * 200.0f);
+        
+        // Pressure systems create ±25 mb variations
+        // High pressure (1015-1040 mb) = clear weather
+        // Low pressure (985-1010 mb) = storms
+        float pressure_delta = pressure_variation * 25.0f;
+        
+        // Subtropical highs around 30° latitude
+        float lat_factor = std::cos(latitude * 3.14159265359f / 180.0f * 2.0f);
+        pressure_delta += lat_factor * 10.0f;
+        
+        return altitude_pressure + pressure_delta;
+    }
+    
+    float get_pressure_gradient(float longitude, float latitude, float current_time) const {
+        // Sample pressure at center and nearby points
+        float center_pressure = get_pressure_at_location(longitude, latitude, 1000.0f, current_time);
+        
+        // Sample 1 degree away in cardinal directions
+        float north_pressure = get_pressure_at_location(longitude, latitude + 1.0f, 1000.0f, current_time);
+        float south_pressure = get_pressure_at_location(longitude, latitude - 1.0f, 1000.0f, current_time);
+        float east_pressure = get_pressure_at_location(longitude + 1.0f, latitude, 1000.0f, current_time);
+        float west_pressure = get_pressure_at_location(longitude - 1.0f, latitude, 1000.0f, current_time);
+        
+        // Calculate gradient magnitude (pressure change per degree)
+        float dx = (east_pressure - west_pressure) / 2.0f;
+        float dy = (north_pressure - south_pressure) / 2.0f;
+        float gradient = std::sqrt(dx * dx + dy * dy);
+        
+        return gradient;
+    }
+    
+    bool is_storm_front(float longitude, float latitude, float current_time) const {
+        float gradient = get_pressure_gradient(longitude, latitude, current_time);
+        
+        // Storm fronts have very steep pressure gradients (> 5 mb per degree)
+        // This represents major frontal systems with significant weather
+        return gradient > 5.0f;
     }
     
     float get_moisture(float longitude, float latitude) const {
@@ -1116,6 +1438,314 @@ float World::get_vegetation_density(float longitude, float latitude, float altit
     return pimpl_->get_vegetation_density(longitude, latitude, altitude);
 }
 
+SoilType World::get_soil_type(float longitude, float latitude, float altitude) const {
+    return pimpl_->get_soil_type(longitude, latitude, altitude);
+}
+
+float World::get_soil_fertility(float longitude, float latitude, float altitude) const {
+    return pimpl_->get_soil_fertility(longitude, latitude, altitude);
+}
+
+float World::get_soil_ph(float longitude, float latitude, float altitude) const {
+    return pimpl_->get_soil_ph(longitude, latitude, altitude);
+}
+
+float World::get_organic_matter(float longitude, float latitude, float altitude) const {
+    return pimpl_->get_organic_matter(longitude, latitude, altitude);
+}
+
+float World::get_pressure_at_location(float longitude, float latitude, float altitude, float current_time) const {
+    return pimpl_->get_pressure_at_location(longitude, latitude, altitude, current_time);
+}
+
+float World::get_pressure_gradient(float longitude, float latitude, float current_time) const {
+    return pimpl_->get_pressure_gradient(longitude, latitude, current_time);
+}
+
+bool World::is_storm_front(float longitude, float latitude, float current_time) const {
+    return pimpl_->is_storm_front(longitude, latitude, current_time);
+}
+
+BatchResult World::batch_query(const std::vector<Location>& locations,
+                               const std::vector<DataType>& data_types) const {
+    BatchResult result;
+    result.count = locations.size();
+    
+    if (locations.empty() || data_types.empty()) {
+        return result;
+    }
+    
+    // Pre-allocate vectors for requested data types
+    for (DataType type : data_types) {
+        switch (type) {
+            case DataType::TERRAIN_HEIGHT:
+                result.terrain_height.reserve(result.count);
+                break;
+            case DataType::TEMPERATURE:
+            case DataType::TEMPERATURE_AT_TIME:
+                result.temperature.reserve(result.count);
+                break;
+            case DataType::BIOME:
+                result.biome.reserve(result.count);
+                break;
+            case DataType::PRECIPITATION:
+            case DataType::CURRENT_PRECIPITATION:
+                result.precipitation.reserve(result.count);
+                break;
+            case DataType::PRECIPITATION_TYPE:
+                result.precipitation_type.reserve(result.count);
+                break;
+            case DataType::AIR_PRESSURE:
+            case DataType::PRESSURE_AT_LOCATION:
+                result.air_pressure.reserve(result.count);
+                break;
+            case DataType::HUMIDITY:
+                result.humidity.reserve(result.count);
+                break;
+            case DataType::WIND_SPEED:
+            case DataType::CURRENT_WIND_SPEED:
+                result.wind_speed.reserve(result.count);
+                break;
+            case DataType::WIND_DIRECTION:
+            case DataType::CURRENT_WIND_DIRECTION:
+                result.wind_direction.reserve(result.count);
+                break;
+            case DataType::IS_RIVER:
+                result.is_river.reserve(result.count);
+                break;
+            case DataType::RIVER_WIDTH:
+                result.river_width.reserve(result.count);
+                break;
+            case DataType::FLOW_ACCUMULATION:
+                result.flow_accumulation.reserve(result.count);
+                break;
+            case DataType::IS_VOLCANO:
+                result.is_volcano.reserve(result.count);
+                break;
+            case DataType::COAL_DEPOSIT:
+                result.coal_deposit.reserve(result.count);
+                break;
+            case DataType::IRON_DEPOSIT:
+                result.iron_deposit.reserve(result.count);
+                break;
+            case DataType::OIL_DEPOSIT:
+                result.oil_deposit.reserve(result.count);
+                break;
+            case DataType::INSOLATION:
+                result.insolation.reserve(result.count);
+                break;
+            case DataType::IS_DAYLIGHT:
+                result.is_daylight.reserve(result.count);
+                break;
+            case DataType::SOLAR_ANGLE:
+                result.solar_angle.reserve(result.count);
+                break;
+            case DataType::VEGETATION_DENSITY:
+                result.vegetation_density.reserve(result.count);
+                break;
+            case DataType::SOIL_TYPE:
+                result.soil_type.reserve(result.count);
+                break;
+            case DataType::SOIL_FERTILITY:
+                result.soil_fertility.reserve(result.count);
+                break;
+            case DataType::SOIL_PH:
+                result.soil_ph.reserve(result.count);
+                break;
+            case DataType::ORGANIC_MATTER:
+                result.organic_matter.reserve(result.count);
+                break;
+            case DataType::PRESSURE_GRADIENT:
+                result.pressure_gradient.reserve(result.count);
+                break;
+            case DataType::IS_STORM_FRONT:
+                result.is_storm_front.reserve(result.count);
+                break;
+        }
+    }
+    
+    // Process all locations
+    for (const Location& loc : locations) {
+        // Cache commonly needed values
+        float terrain_height = 0.0f;
+        float altitude = loc.altitude;
+        bool terrain_computed = false;
+        
+        // If altitude is needed but not provided, compute terrain height once
+        auto ensure_terrain = [&]() {
+            if (!terrain_computed) {
+                terrain_height = pimpl_->get_terrain_height(loc.longitude, loc.latitude, loc.detail_level);
+                if (loc.altitude == 0.0f) {
+                    altitude = std::max(terrain_height, 0.0f);
+                }
+                terrain_computed = true;
+            }
+        };
+        
+        // Query each requested data type
+        for (DataType type : data_types) {
+            switch (type) {
+                case DataType::TERRAIN_HEIGHT:
+                    ensure_terrain();
+                    result.terrain_height.push_back(terrain_height);
+                    break;
+                    
+                case DataType::TEMPERATURE:
+                    ensure_terrain();
+                    result.temperature.push_back(pimpl_->get_temperature(loc.longitude, loc.latitude, altitude));
+                    break;
+                    
+                case DataType::TEMPERATURE_AT_TIME:
+                    ensure_terrain();
+                    result.temperature.push_back(pimpl_->get_temperature_at_time(loc.longitude, loc.latitude, altitude, loc.current_time));
+                    break;
+                    
+                case DataType::BIOME:
+                    ensure_terrain();
+                    result.biome.push_back(pimpl_->classify_biome(loc.longitude, loc.latitude, altitude));
+                    break;
+                    
+                case DataType::PRECIPITATION:
+                    ensure_terrain();
+                    result.precipitation.push_back(pimpl_->get_precipitation(loc.longitude, loc.latitude, altitude));
+                    break;
+                    
+                case DataType::CURRENT_PRECIPITATION:
+                    ensure_terrain();
+                    result.precipitation.push_back(pimpl_->get_current_precipitation(loc.longitude, loc.latitude, altitude, loc.current_time));
+                    break;
+                    
+                case DataType::PRECIPITATION_TYPE: {
+                    ensure_terrain();
+                    float temp = pimpl_->get_temperature(loc.longitude, loc.latitude, altitude);
+                    float precip = pimpl_->get_precipitation(loc.longitude, loc.latitude, altitude);
+                    PrecipitationType ptype = PrecipitationType::NONE;
+                    if (precip >= 100.0f) {
+                        if (temp < -2.0f) {
+                            ptype = PrecipitationType::SNOW;
+                        } else if (temp < 2.0f) {
+                            ptype = PrecipitationType::SLEET;
+                        } else {
+                            ptype = PrecipitationType::RAIN;
+                        }
+                    }
+                    result.precipitation_type.push_back(ptype);
+                    break;
+                }
+                    
+                case DataType::AIR_PRESSURE:
+                    result.air_pressure.push_back(pimpl_->get_air_pressure(altitude));
+                    break;
+                    
+                case DataType::HUMIDITY:
+                    ensure_terrain();
+                    result.humidity.push_back(pimpl_->get_humidity(loc.longitude, loc.latitude, altitude));
+                    break;
+                    
+                case DataType::WIND_SPEED:
+                    ensure_terrain();
+                    result.wind_speed.push_back(pimpl_->get_wind_speed(loc.longitude, loc.latitude, altitude));
+                    break;
+                    
+                case DataType::CURRENT_WIND_SPEED:
+                    ensure_terrain();
+                    result.wind_speed.push_back(pimpl_->get_current_wind_speed(loc.longitude, loc.latitude, altitude, loc.current_time));
+                    break;
+                    
+                case DataType::WIND_DIRECTION:
+                    ensure_terrain();
+                    result.wind_direction.push_back(pimpl_->get_wind_direction(loc.longitude, loc.latitude, altitude));
+                    break;
+                    
+                case DataType::CURRENT_WIND_DIRECTION:
+                    ensure_terrain();
+                    result.wind_direction.push_back(pimpl_->get_current_wind_direction(loc.longitude, loc.latitude, altitude, loc.current_time));
+                    break;
+                    
+                case DataType::IS_RIVER:
+                    result.is_river.push_back(pimpl_->is_river(loc.longitude, loc.latitude));
+                    break;
+                    
+                case DataType::RIVER_WIDTH:
+                    result.river_width.push_back(pimpl_->get_river_width(loc.longitude, loc.latitude));
+                    break;
+                    
+                case DataType::FLOW_ACCUMULATION:
+                    result.flow_accumulation.push_back(pimpl_->get_flow_accumulation(loc.longitude, loc.latitude));
+                    break;
+                    
+                case DataType::IS_VOLCANO:
+                    result.is_volcano.push_back(pimpl_->is_volcano(loc.longitude, loc.latitude));
+                    break;
+                    
+                case DataType::COAL_DEPOSIT:
+                    result.coal_deposit.push_back(pimpl_->get_coal_deposit(loc.longitude, loc.latitude));
+                    break;
+                    
+                case DataType::IRON_DEPOSIT:
+                    result.iron_deposit.push_back(pimpl_->get_iron_deposit(loc.longitude, loc.latitude));
+                    break;
+                    
+                case DataType::OIL_DEPOSIT:
+                    result.oil_deposit.push_back(pimpl_->get_oil_deposit(loc.longitude, loc.latitude));
+                    break;
+                    
+                case DataType::INSOLATION:
+                    result.insolation.push_back(pimpl_->get_insolation(loc.longitude, loc.latitude, loc.current_time));
+                    break;
+                    
+                case DataType::IS_DAYLIGHT:
+                    result.is_daylight.push_back(pimpl_->is_daylight(loc.longitude, loc.latitude, loc.current_time));
+                    break;
+                    
+                case DataType::SOLAR_ANGLE:
+                    result.solar_angle.push_back(pimpl_->get_solar_angle(loc.longitude, loc.latitude, loc.current_time));
+                    break;
+                    
+                case DataType::VEGETATION_DENSITY:
+                    ensure_terrain();
+                    result.vegetation_density.push_back(pimpl_->get_vegetation_density(loc.longitude, loc.latitude, altitude));
+                    break;
+                    
+                case DataType::SOIL_TYPE:
+                    ensure_terrain();
+                    result.soil_type.push_back(pimpl_->get_soil_type(loc.longitude, loc.latitude, altitude));
+                    break;
+                    
+                case DataType::SOIL_FERTILITY:
+                    ensure_terrain();
+                    result.soil_fertility.push_back(pimpl_->get_soil_fertility(loc.longitude, loc.latitude, altitude));
+                    break;
+                    
+                case DataType::SOIL_PH:
+                    ensure_terrain();
+                    result.soil_ph.push_back(pimpl_->get_soil_ph(loc.longitude, loc.latitude, altitude));
+                    break;
+                    
+                case DataType::ORGANIC_MATTER:
+                    ensure_terrain();
+                    result.organic_matter.push_back(pimpl_->get_organic_matter(loc.longitude, loc.latitude, altitude));
+                    break;
+                    
+                case DataType::PRESSURE_AT_LOCATION:
+                    ensure_terrain();
+                    result.pressure_at_location.push_back(pimpl_->get_pressure_at_location(loc.longitude, loc.latitude, altitude, loc.current_time));
+                    break;
+                    
+                case DataType::PRESSURE_GRADIENT:
+                    result.pressure_gradient.push_back(pimpl_->get_pressure_gradient(loc.longitude, loc.latitude, loc.current_time));
+                    break;
+                    
+                case DataType::IS_STORM_FRONT:
+                    result.is_storm_front.push_back(pimpl_->is_storm_front(loc.longitude, loc.latitude, loc.current_time));
+                    break;
+            }
+        }
+    }
+    
+    return result;
+}
+
 void World::set_config(const WorldConfig& config) {
     pimpl_->config = config;
     pimpl_->initialize_noise_generators();
@@ -1145,6 +1775,20 @@ const char* biome_to_string(BiomeType biome) {
         case BiomeType::MOUNTAIN_TUNDRA: return "Mountain Tundra";
         case BiomeType::MOUNTAIN_FOREST: return "Mountain Forest";
         case BiomeType::MOUNTAIN_PEAK: return "Mountain Peak";
+        default: return "Unknown";
+    }
+}
+
+const char* soil_to_string(SoilType soil) {
+    switch (soil) {
+        case SoilType::CLAY: return "Clay";
+        case SoilType::SILT: return "Silt";
+        case SoilType::SAND: return "Sand";
+        case SoilType::LOAM: return "Loam";
+        case SoilType::PEAT: return "Peat";
+        case SoilType::ROCKY: return "Rocky";
+        case SoilType::PERMAFROST: return "Permafrost";
+        case SoilType::NONE: return "None";
         default: return "Unknown";
     }
 }
