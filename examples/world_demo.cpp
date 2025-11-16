@@ -238,7 +238,8 @@ enum class DisplayMode {
     COAL,
     IRON,
     OIL,
-    INSOLATION
+    INSOLATION,
+    VEGETATION
 };
 
 #ifdef USE_SDL2_TTF
@@ -305,19 +306,28 @@ struct TextRenderer {
 // Cloud layer generator
 struct CloudLayer {
     FastNoiseLite cloud_noise;
+    FastNoiseLite cloud_cells; // For creating distinct cloud masses
     uint64_t seed;
     const World* world_ptr; // Pointer to world for weather data
     
     CloudLayer(uint64_t world_seed, const World* world) : seed(world_seed), world_ptr(world) {
+        // Base cloud noise for texture
         cloud_noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
         cloud_noise.SetFractalType(FastNoiseLite::FractalType_FBm);
         cloud_noise.SetFractalOctaves(3);
-        cloud_noise.SetFrequency(0.005f);
+        cloud_noise.SetFrequency(0.008f); // Coarser for larger cloud formations
         cloud_noise.SetSeed(static_cast<int>(world_seed + 5000));
+        
+        // Cellular pattern for distinct weather systems
+        cloud_cells.SetNoiseType(FastNoiseLite::NoiseType_Cellular);
+        cloud_cells.SetCellularDistanceFunction(FastNoiseLite::CellularDistanceFunction_Euclidean);
+        cloud_cells.SetCellularReturnType(FastNoiseLite::CellularReturnType_Distance2Add);
+        cloud_cells.SetFrequency(0.002f); // Large weather systems
+        cloud_cells.SetSeed(static_cast<int>(world_seed + 5001));
     }
     
     // Get cloud density at a location (0 = clear, 1 = dense clouds)
-    float get_cloud_density(float longitude, float latitude) const {
+    float get_cloud_density(float longitude, float latitude, float current_time) const {
         // Convert to 3D coordinates on sphere
         float lon_rad = longitude * 3.14159265359f / 180.0f;
         float lat_rad = latitude * 3.14159265359f / 180.0f;
@@ -326,41 +336,71 @@ struct CloudLayer {
         float y = r * std::cos(lat_rad) * std::sin(lon_rad);
         float z = r * std::sin(lat_rad);
         
-        // Get base noise pattern for cloud variation
-        float noise = cloud_noise.GetNoise(x, y, z);
-        noise = (noise + 1.0f) * 0.5f; // Convert from -1,1 to 0,1
-        
-        // Get world weather data
+        // Get wind direction and speed at this location
         float terrain_height = world_ptr->get_terrain_height(longitude, latitude, 1.0f);
-        float altitude = std::max(terrain_height, 0.0f);
-        float temperature = world_ptr->get_temperature(longitude, latitude, altitude);
-        float humidity = world_ptr->get_humidity(longitude, latitude, altitude);
-        float precipitation = world_ptr->get_precipitation(longitude, latitude, altitude);
+        float altitude = std::max(terrain_height, 0.0f) + 1000.0f; // Cloud altitude
+        float wind_speed = world_ptr->get_wind_speed(longitude, latitude, altitude);
+        float wind_direction = world_ptr->get_wind_direction(longitude, latitude, altitude);
         
-        // Cloud density is heavily influenced by humidity
-        float cloud_base = humidity * 0.8f + 0.2f * noise;
+        // Convert wind direction to movement vector
+        float wind_rad = wind_direction * 3.14159265359f / 180.0f;
+        float wind_x = std::sin(wind_rad);
+        float wind_y = std::cos(wind_rad);
         
-        // High precipitation areas have more clouds
-        float precip_factor = std::clamp(precipitation / 2000.0f, 0.0f, 1.0f);
-        cloud_base = cloud_base * 0.6f + precip_factor * 0.4f;
+        // Move clouds based on wind (speed affects how fast clouds move)
+        // Scale time by wind speed and direction
+        float time_scale = current_time * 0.5f; // Base time progression
+        float wind_offset_x = wind_x * wind_speed * time_scale * 5.0f;
+        float wind_offset_y = wind_y * wind_speed * time_scale * 5.0f;
+        
+        // Sample noise at wind-advected position
+        float noise = cloud_noise.GetNoise(x + wind_offset_x, y + wind_offset_y, z);
+        noise = (noise + 1.0f) * 0.5f; // 0-1
+        
+        // Large-scale weather systems (highs and lows)
+        float cells = cloud_cells.GetNoise(x + wind_offset_x * 0.5f, y + wind_offset_y * 0.5f, z);
+        cells = (cells + 1.0f) * 0.5f; // 0-1
+        
+        // Get world weather data (use surface altitude, not cloud altitude)
+        float surface_altitude = std::max(terrain_height, 0.0f);
+        float temperature = world_ptr->get_temperature(longitude, latitude, surface_altitude);
+        float humidity = world_ptr->get_humidity(longitude, latitude, surface_altitude);
+        float precipitation = world_ptr->get_precipitation(longitude, latitude, surface_altitude);
+        
+        // Weather systems - some areas have high/low pressure creating cloud regions
+        float weather_system = cells * cells; // Emphasize systems
+        
+        // Base cloud formation from humidity and precipitation
+        float cloud_base = (humidity * 0.6f + precipitation / 2500.0f * 0.4f);
+        
+        // Weather systems modulate cloud cover
+        // High cells value = high pressure (clear), low = low pressure (cloudy)
+        float pressure_effect = 1.0f - (weather_system * 0.5f); // Inverted - low pressure = more clouds
+        cloud_base *= (0.5f + pressure_effect);
+        
+        // Detailed cloud texture from noise
+        float cloud_texture = noise * noise; // Squared for patchiness
+        
+        // Combine base tendency with texture
+        float cloud_density = cloud_base * (0.6f + cloud_texture * 0.4f);
         
         // Temperature affects cloud formation
-        // Moderate temperatures (10-25°C) have more clouds
         float temp_factor = 1.0f;
         if (temperature < -10.0f) {
-            temp_factor = 0.5f; // Very cold = less clouds
+            temp_factor = 0.6f; // Very cold = less clouds
         } else if (temperature > 35.0f) {
             temp_factor = 0.7f; // Very hot/dry = fewer clouds
         } else if (temperature >= 10.0f && temperature <= 25.0f) {
-            temp_factor = 1.2f; // Optimal for cloud formation
+            temp_factor = 1.3f; // Optimal for cloud formation
         }
-        cloud_base *= temp_factor;
+        cloud_density *= temp_factor;
         
-        // Add noise variation for patchiness
-        float cloud_density = cloud_base * noise;
-        
-        // Make clouds more patchy
-        cloud_density = std::pow(cloud_density, 1.2f);
+        // Sharpen cloud edges - make distinct cloud masses
+        if (cloud_density > 0.4f) {
+            cloud_density = 0.4f + (cloud_density - 0.4f) * 1.5f;
+        } else {
+            cloud_density *= 0.7f; // Reduce thin clouds
+        }
         
         return std::clamp(cloud_density, 0.0f, 1.0f);
     }
@@ -372,6 +412,7 @@ struct ViewState {
     float zoom = 1.0f;            // Zoom level (1.0 = whole world, higher = more zoomed in)
     float current_time = 12.0f;   // Time of day in hours (0-24)
     bool time_paused = true;      // Whether time advances automatically
+    float time_speed = 1.0f;      // Time speed multiplier (1.0 = normal, 10.0 = 10x faster)
     
     // Convert screen coordinates to world coordinates
     void screen_to_world(int screen_x, int screen_y, int width, int height, 
@@ -404,7 +445,7 @@ void render_cloud_overlay(SDL_Renderer* renderer, const CloudLayer& clouds,
             float lon, lat;
             view.screen_to_world(x, y, width, height, lon, lat);
             
-            float density = clouds.get_cloud_density(lon, lat);
+            float density = clouds.get_cloud_density(lon, lat, view.current_time);
             
             // Only draw clouds where density is significant
             if (density > 0.3f) {
@@ -539,6 +580,28 @@ void render_world_map(SDL_Renderer* renderer, const World& world,
                     }
                     break;
                 }
+                case DisplayMode::VEGETATION: {
+                    // Show vegetation density
+                    float height = world.get_terrain_height(lon, lat, view.zoom);
+                    float altitude = std::max(height, 0.0f);
+                    float veg_density = world.get_vegetation_density(lon, lat, altitude);
+                    
+                    // Color scale from brown (no veg) through green to dark green (dense)
+                    if (height <= 0.0f) {
+                        // Ocean
+                        color = get_height_color(height);
+                    } else if (veg_density < 0.1f) {
+                        // Barren - brown/tan
+                        color = {160, 140, 100};
+                    } else {
+                        // Interpolate from light green to dark green
+                        uint8_t r = static_cast<uint8_t>(150 - veg_density * 130);
+                        uint8_t g = static_cast<uint8_t>(100 + veg_density * 100);
+                        uint8_t b = static_cast<uint8_t>(50 - veg_density * 30);
+                        color = {r, g, b};
+                    }
+                    break;
+                }
             }
             
             SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
@@ -566,11 +629,12 @@ void render_info_panel(SDL_Renderer* renderer, const World& world,
     float terrain_height = world.get_terrain_height(lon, lat);
     float altitude = std::max(terrain_height, 0.0f);
     float temp = world.get_temperature(lon, lat, altitude);
+    float temp_dynamic = world.get_temperature_at_time(lon, lat, altitude, view.current_time);
     float precip = world.get_precipitation(lon, lat, altitude);
     BiomeType biome = world.get_biome(lon, lat, altitude);
     
     // Draw semi-transparent info panel
-    SDL_Rect panel = {10, 10, 320, 250};
+    SDL_Rect panel = {10, 10, 320, 400};
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 200);
     SDL_RenderFillRect(renderer, &panel);
@@ -601,8 +665,8 @@ void render_info_panel(SDL_Renderer* renderer, const World& world,
         text_renderer->draw_text(renderer, buffer, 20, text_y, gray);
         text_y += 20;
         
-        // Temperature
-        snprintf(buffer, sizeof(buffer), "Temperature: %.1f C", temp);
+        // Temperature - show both base and dynamic
+        snprintf(buffer, sizeof(buffer), "Temp: %.1f%cC (now: %.1f%cC)", temp, 176, temp_dynamic, 176);
         text_renderer->draw_text(renderer, buffer, 20, text_y, gray);
         text_y += 20;
         
@@ -623,14 +687,15 @@ void render_info_panel(SDL_Renderer* renderer, const World& world,
         text_renderer->draw_text(renderer, buffer, 20, text_y, gray);
         text_y += 20;
         
-        // Wind speed
-        float wind_speed = world.get_wind_speed(lon, lat, altitude);
-        snprintf(buffer, sizeof(buffer), "Wind Speed: %.1f m/s", wind_speed);
+        // Wind speed (current with variation)
+        float wind_speed = world.get_current_wind_speed(lon, lat, altitude, view.current_time);
+        float wind_avg = world.get_wind_speed(lon, lat, altitude);
+        snprintf(buffer, sizeof(buffer), "Wind: %.1f m/s (avg: %.1f)", wind_speed, wind_avg);
         text_renderer->draw_text(renderer, buffer, 20, text_y, gray);
         text_y += 20;
         
-        // Wind direction
-        float wind_dir = world.get_wind_direction(lon, lat, altitude);
+        // Wind direction (current with variation)
+        float wind_dir = world.get_current_wind_direction(lon, lat, altitude, view.current_time);
         const char* wind_compass = "";
         if (wind_dir >= 337.5f || wind_dir < 22.5f) wind_compass = "N";
         else if (wind_dir < 67.5f) wind_compass = "NE";
@@ -643,6 +708,17 @@ void render_info_panel(SDL_Renderer* renderer, const World& world,
         snprintf(buffer, sizeof(buffer), "Wind Dir: %.0f%c (%s)", wind_dir, 176, wind_compass);
         text_renderer->draw_text(renderer, buffer, 20, text_y, gray);
         text_y += 20;
+        
+        // Current precipitation
+        float current_precip = world.get_current_precipitation(lon, lat, altitude, view.current_time);
+        if (current_precip > 0.1f) {
+            const char* precip_str = temp_dynamic < 0.0f ? "Snowing" : "Raining";
+            const char* intensity = current_precip < 0.3f ? "Light" : 
+                                   current_precip < 0.6f ? "Moderate" : "Heavy";
+            snprintf(buffer, sizeof(buffer), "%s %s (%.0f%%)", intensity, precip_str, current_precip * 100);
+            text_renderer->draw_text(renderer, buffer, 20, text_y, SDL_Color{100, 150, 255, 255});
+            text_y += 20;
+        }
         
         // River info
         if (world.is_river(lon, lat)) {
@@ -694,6 +770,12 @@ void render_info_panel(SDL_Renderer* renderer, const World& world,
         text_renderer->draw_text(renderer, buffer, 20, text_y, SDL_Color{200, 200, 255, 255});
         text_y += 20;
         
+        if (!view.time_paused && view.time_speed != 1.0f) {
+            snprintf(buffer, sizeof(buffer), "Speed: %.1fx", view.time_speed);
+            text_renderer->draw_text(renderer, buffer, 20, text_y, SDL_Color{180, 180, 200, 255});
+            text_y += 20;
+        }
+        
         snprintf(buffer, sizeof(buffer), "Insolation: %.0f W/m%c", insolation, 178); // ² symbol
         text_renderer->draw_text(renderer, buffer, 20, text_y, 
                                 is_day ? SDL_Color{255, 255, 100, 255} : SDL_Color{100, 100, 150, 255});
@@ -704,6 +786,22 @@ void render_info_panel(SDL_Renderer* renderer, const World& world,
             text_renderer->draw_text(renderer, buffer, 20, text_y, SDL_Color{255, 200, 100, 255});
         } else {
             text_renderer->draw_text(renderer, "Night", 20, text_y, SDL_Color{100, 100, 150, 255});
+        }
+        text_y += 20;
+        
+        // Season info
+        WorldConfig cfg = world.get_config();
+        const char* season_names[] = {"Winter", "Spring", "Summer", "Fall"};
+        int season_idx = ((cfg.day_of_year + 10) / 91) % 4;
+        snprintf(buffer, sizeof(buffer), "Day %d (%s)", cfg.day_of_year, season_names[season_idx]);
+        text_renderer->draw_text(renderer, buffer, 20, text_y, SDL_Color{200, 200, 200, 255});
+        text_y += 20;
+        
+        // Vegetation density
+        float veg = world.get_vegetation_density(lon, lat, altitude);
+        if (veg > 0.01f) {
+            snprintf(buffer, sizeof(buffer), "Vegetation: %d%%", static_cast<int>(veg * 100));
+            text_renderer->draw_text(renderer, buffer, 20, text_y, SDL_Color{100, 200, 100, 255});
         }
     } else
 #endif
@@ -761,6 +859,7 @@ void render_info_panel(SDL_Renderer* renderer, const World& world,
             case DisplayMode::IRON: mode_text = "Mode: Iron (8)"; break;
             case DisplayMode::OIL: mode_text = "Mode: Oil (9)"; break;
             case DisplayMode::INSOLATION: mode_text = "Mode: Insolation (0)"; break;
+            case DisplayMode::VEGETATION: mode_text = "Mode: Vegetation (V)"; break;
         }
         text_renderer->draw_text(renderer, mode_text, 20, map_height - 33, white);
     }
@@ -820,7 +919,10 @@ void run_sdl_demo(World& world) {
     std::cout << "  8 - Show Iron Deposits\n";
     std::cout << "  9 - Show Oil Deposits\n";
     std::cout << "  0 - Show Insolation (Day/Night)\n";
+    std::cout << "  V - Show Vegetation Density\n";
+    std::cout << "  < / > - Change season (shift+comma/period)\n";
     std::cout << "  SPACE - Pause/Resume time\n";
+    std::cout << "  + / - - Increase/Decrease time speed\n";
     std::cout << "  [ / ] - Decrease/Increase time\n";
     std::cout << "  R - Regenerate world (new seed)\n";
     std::cout << "  Mouse Wheel - Zoom in/out at cursor position\n";
@@ -898,9 +1000,42 @@ void run_sdl_demo(World& world) {
                         need_redraw = true;
                         std::cout << "Display mode: Insolation (Time: " << view_state.current_time << "h)\n";
                         break;
+                    case SDLK_v:
+                        current_mode = DisplayMode::VEGETATION;
+                        need_redraw = true;
+                        std::cout << "Display mode: Vegetation Density\n";
+                        break;
+                    case SDLK_COMMA: // < key - previous season (shift+comma)
+                    case SDLK_PERIOD: { // > key - next season (shift+period)
+                        WorldConfig cfg = world.get_config();
+                        if (event.key.keysym.sym == SDLK_COMMA) {
+                            cfg.day_of_year -= 30;
+                            if (cfg.day_of_year < 0) cfg.day_of_year += 365;
+                        } else {
+                            cfg.day_of_year += 30;
+                            if (cfg.day_of_year >= 365) cfg.day_of_year -= 365;
+                        }
+                        world.set_config(cfg);
+                        need_redraw = true;
+                        const char* seasons[] = {"Winter", "Spring", "Summer", "Fall"};
+                        int season = ((cfg.day_of_year + 10) / 91) % 4;
+                        std::cout << "Day of year: " << cfg.day_of_year << " (" << seasons[season] << ")\n";
+                        break;
+                    }
                     case SDLK_SPACE:
                         view_state.time_paused = !view_state.time_paused;
                         std::cout << "Time " << (view_state.time_paused ? "paused" : "running") << "\n";
+                        break;
+                    case SDLK_EQUALS: // + key (with or without shift)
+                    case SDLK_PLUS:
+                        view_state.time_speed *= 2.0f;
+                        if (view_state.time_speed > 100.0f) view_state.time_speed = 100.0f;
+                        std::cout << "Time speed: " << view_state.time_speed << "x\n";
+                        break;
+                    case SDLK_MINUS:
+                        view_state.time_speed /= 2.0f;
+                        if (view_state.time_speed < 0.1f) view_state.time_speed = 0.1f;
+                        std::cout << "Time speed: " << view_state.time_speed << "x\n";
                         break;
                     case SDLK_LEFTBRACKET: // [ key - decrease time
                         view_state.current_time -= 0.5f;
@@ -998,12 +1133,12 @@ void run_sdl_demo(World& world) {
         
         // Advance time if not paused
         if (!view_state.time_paused) {
-            view_state.current_time += 0.01f; // Advance by ~36 seconds per frame
+            view_state.current_time += 0.01f * view_state.time_speed; // Scale by time_speed
             if (view_state.current_time >= 24.0f) {
                 view_state.current_time -= 24.0f;
             }
-            // Redraw if showing insolation (day/night changes)
-            if (current_mode == DisplayMode::INSOLATION) {
+            // Redraw if showing time-dependent modes
+            if (current_mode == DisplayMode::INSOLATION || current_mode == DisplayMode::CLOUDS) {
                 need_redraw = true;
             }
         }

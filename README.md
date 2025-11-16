@@ -4,32 +4,56 @@ A C++ library for procedural generation of living world environments with enviro
 
 ## Features
 
-- **Procedural Terrain Generation**: Continents, oceans, mountains, and valleys using noise functions
-- **Climate Simulation**: Temperature based on latitude and altitude with realistic gradients
+- **Procedural Terrain Generation**: Continents, oceans, mountains, valleys, and volcanic features
+- **Climate Simulation**: Temperature based on latitude, altitude, and season with realistic gradients
 - **Biome Classification**: 18+ biome types using Whittaker diagram approach
-- **Atmospheric Physics**: Air pressure decreases exponentially with altitude
-- **Weather Systems**: Precipitation, humidity, and precipitation type (rain/snow/sleet)
+- **Atmospheric Physics**: Air pressure, humidity, cloud cover with weather-linked density
+- **Weather Systems**: Precipitation, wind speed/direction, precipitation type (rain/snow/sleet)
+- **Hydrology**: River networks with flow accumulation and width based on drainage
+- **Day/Night Cycle**: Realistic solar angles with time-of-day and seasonal variations
+- **Insolation Modeling**: Solar radiation affected by latitude, time, cloud cover, and season
+- **Vegetation Density**: Realistic plant coverage based on biome, climate, and altitude
+- **Resource Distribution**: Coal, iron ore, and oil deposits with geological realism
 - **Deterministic Generation**: Same seed produces identical worlds
-- **Clean API**: Simple coordinate-based queries (longitude, latitude, altitude)
-- **Interactive Visualization**: SDL2-based graphical demo with multiple display modes
+- **Clean API**: Simple coordinate-based queries (longitude, latitude, altitude, time)
+- **Interactive Visualization**: SDL2-based graphical demo with 11+ display modes
 
 ## SDL2 Visualization Features
 
 The demo application includes an interactive graphical interface when built with SDL2:
 
 - **Multiple Display Modes**:
-  - Biomes (default) - Colour-coded biome classification
-  - Elevation - Terrain height visualization
-  - Temperature - Heat map of world temperatures
-  - Precipitation - Rainfall and snowfall distribution
+  - Biomes (key 1) - Color-coded biome classification
+  - Elevation (key 2) - Terrain height visualization
+  - Temperature (key 3) - Heat map of world temperatures
+  - Precipitation (key 4) - Rainfall and snowfall distribution
+  - Clouds (key 5) - Cloud cover linked to weather
+  - Rivers (key 6) - River networks with flow visualization
+  - Coal (key 7) - Coal deposit concentrations
+  - Iron (key 8) - Iron ore deposit locations
+  - Oil (key 9) - Oil field distributions
+  - Insolation (key 0) - Day/night cycle and solar radiation
+  - Vegetation (key V) - Plant density and coverage
 
 - **Interactive Controls**:
-  - `1-4` keys: Switch between display modes
+  - `1-9, 0, V` keys: Switch between display modes
+  - `Mouse Wheel`: Zoom in/out at cursor position
+  - `SPACE`: Pause/resume time progression
+  - `[ / ]`: Decrease/increase time of day
+  - `< / >` (Shift+comma/period): Change season
   - `R` key: Regenerate world with random seed
   - `ESC/Q`: Quit application
-  - Mouse hover: Shows location details (coordinates, biome, temperature, etc.)
+  - Mouse hover: Shows location details (coordinates, biome, temperature, resources, etc.)
 
-- **Real-time Information Panel**: Displays environmental data for mouse location
+- **Real-time Information Panel**: Displays comprehensive environmental data including:
+  - Position, elevation, biome type
+  - Temperature, precipitation, humidity
+  - Wind speed and direction
+  - River information
+  - Mineral deposits
+  - Time of day and solar data
+  - Current season (day of year)
+  - Vegetation density
 
 ## Quick Start
 
@@ -85,13 +109,26 @@ int main() {
 
 ### Core Methods
 
-- `float get_terrain_height(longitude, latitude)` - Terrain elevation in meters
+- `float get_terrain_height(longitude, latitude, detail_level)` - Terrain elevation with zoom-dependent detail
 - `float get_temperature(longitude, latitude, altitude)` - Temperature in °C
 - `BiomeType get_biome(longitude, latitude, altitude)` - Biome classification
 - `float get_precipitation(longitude, latitude, altitude)` - Precipitation in mm/year
 - `float get_air_pressure(longitude, latitude, altitude)` - Pressure in hPa/millibars
 - `float get_humidity(longitude, latitude, altitude)` - Relative humidity (0-1)
 - `PrecipitationType get_precipitation_type(...)` - Rain, snow, or sleet
+- `float get_wind_speed(longitude, latitude, altitude)` - Wind speed in m/s
+- `float get_wind_direction(longitude, latitude, altitude)` - Wind direction in degrees
+- `bool is_river(longitude, latitude)` - Check for river presence
+- `float get_river_width(longitude, latitude)` - River width in meters
+- `float get_flow_accumulation(longitude, latitude)` - Upstream drainage
+- `bool is_volcano(longitude, latitude)` - Check for volcanic features
+- `float get_coal_deposit(longitude, latitude)` - Coal concentration (0-1)
+- `float get_iron_deposit(longitude, latitude)` - Iron ore concentration (0-1)
+- `float get_oil_deposit(longitude, latitude)` - Oil concentration (0-1)
+- `float get_insolation(longitude, latitude, time)` - Solar radiation in W/m²
+- `float get_solar_angle(longitude, latitude, time)` - Sun elevation angle
+- `bool is_daylight(longitude, latitude, time)` - Day/night check
+- `float get_vegetation_density(longitude, latitude, altitude)` - Plant coverage (0-1)
 
 ### Coordinate System
 
@@ -131,8 +168,9 @@ Customize world generation through `WorldConfig`:
 rworld::WorldConfig config;
 config.seed = 42;
 config.world_scale = 1.0f;
+config.day_of_year = 172;            // Summer solstice (June 21)
 config.equator_temperature = 30.0f;  // °C
-config.pole_temperature = -40.0f;     // °C
+config.pole_temperature = -40.0f;    // °C
 config.temperature_lapse_rate = 6.5f; // °C per 1000m
 config.terrain_frequency = 0.001f;
 config.terrain_octaves = 6;
@@ -156,14 +194,12 @@ MIT License - See LICENSE file for details
 
 ## Future Enhancements
 
-- Chunk-based caching for performance
-- Ocean currents and wind patterns
-- Seasonal variations
-- Rivers and water flow
-- Vegetation density
-- Mineral/resource distribution
-- Dynamic weather simulation
-- Batch query API for region generation
+- Chunk-based caching for performance optimization
+- Dynamic weather simulation with storm systems
+- Batch query API for efficient region generation
+- Ocean currents modeling (wind patterns implemented)
+- Tectonic plate simulation
+- Erosion and geological time simulation
 
 ## Contributing
 

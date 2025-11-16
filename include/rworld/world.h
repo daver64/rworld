@@ -57,6 +57,7 @@ enum class PrecipitationType {
 struct WorldConfig {
     uint64_t seed = 12345;
     float world_scale = 1.0f;
+    int day_of_year = 80; // Day of year (0-364), default is spring equinox (March 21)
     
     // Temperature parameters (Celsius)
     float equator_temperature = 30.0f;
@@ -135,6 +136,22 @@ public:
     float get_temperature(float longitude, float latitude, float altitude) const;
     
     /**
+     * Get temperature at a specific location and time
+     * 
+     * This includes dynamic effects from:
+     * - Base temperature (latitude, altitude, season)
+     * - Solar insolation (time of day)
+     * - Cloud cover (cooling effect)
+     * 
+     * @param longitude Longitude in degrees (-180 to 180)
+     * @param latitude Latitude in degrees (-90 to 90)
+     * @param altitude Altitude in meters
+     * @param current_time Time of day in hours (0-24)
+     * @return Temperature in degrees Celsius including dynamic effects
+     */
+    float get_temperature_at_time(float longitude, float latitude, float altitude, float current_time) const;
+    
+    /**
      * Get terrain height at a location (ignoring altitude parameter)
      * 
      * @param longitude Longitude in degrees (-180 to 180)
@@ -153,6 +170,19 @@ public:
      * @return Precipitation in mm per year
      */
     float get_precipitation(float longitude, float latitude, float altitude) const;
+    
+    /**
+     * Get instantaneous precipitation at a location and time
+     * 
+     * Includes temporal weather variation. Use this for current rain/snow conditions.
+     * 
+     * @param longitude Longitude in degrees (-180 to 180)
+     * @param latitude Latitude in degrees (-90 to 90)
+     * @param altitude Altitude in meters
+     * @param current_time Time in hours (used for weather system movement)
+     * @return Current precipitation rate (0-1, where 1 = heavy rain/snow)
+     */
+    float get_current_precipitation(float longitude, float latitude, float altitude, float current_time) const;
     
     /**
      * Get the type of precipitation at a location
@@ -200,6 +230,19 @@ public:
     float get_wind_speed(float longitude, float latitude, float altitude) const;
     
     /**
+     * Get wind speed at a location and time
+     * 
+     * Includes temporal weather variation for current wind conditions.
+     * 
+     * @param longitude Longitude in degrees (-180 to 180)
+     * @param latitude Latitude in degrees (-90 to 90)
+     * @param altitude Altitude in meters
+     * @param current_time Time in hours (used for weather system movement)
+     * @return Current wind speed in meters per second
+     */
+    float get_current_wind_speed(float longitude, float latitude, float altitude, float current_time) const;
+    
+    /**
      * Get wind direction at a location
      * 
      * Direction in degrees where 0° is North, 90° is East, 180° is South, 270° is West
@@ -210,6 +253,19 @@ public:
      * @return Wind direction in degrees (0-360)
      */
     float get_wind_direction(float longitude, float latitude, float altitude) const;
+    
+    /**
+     * Get wind direction at a location and time
+     * 
+     * Includes temporal weather variation for current wind conditions.
+     * 
+     * @param longitude Longitude in degrees (-180 to 180)
+     * @param latitude Latitude in degrees (-90 to 90)
+     * @param altitude Altitude in meters
+     * @param current_time Time in hours (used for weather system movement)
+     * @return Current wind direction in degrees (0-360)
+     */
+    float get_current_wind_direction(float longitude, float latitude, float altitude, float current_time) const;
     
     /**
      * Check if there is a river at this location
@@ -330,6 +386,19 @@ public:
      * @return Solar elevation angle in degrees (negative = below horizon)
      */
     float get_solar_angle(float longitude, float latitude, float current_time) const;
+    
+    /**
+     * Get vegetation density at a location
+     * 
+     * Vegetation density is based on temperature, precipitation, and biome type.
+     * Useful for determining tree cover, foliage rendering, or resource availability.
+     * 
+     * @param longitude Longitude in degrees (-180 to 180)
+     * @param latitude Latitude in degrees (-90 to 90)
+     * @param altitude Altitude in meters
+     * @return Vegetation density (0-1, where 0=barren, 1=dense forest/jungle)
+     */
+    float get_vegetation_density(float longitude, float latitude, float altitude) const;
     
     /**
      * Update the world configuration

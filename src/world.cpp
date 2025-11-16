@@ -19,6 +19,7 @@ public:
     FastNoiseLite iron_noise;
     FastNoiseLite oil_noise;
     FastNoiseLite cloud_noise;
+    FastNoiseLite weather_noise; // For temporal weather variations
     
     explicit Impl(const WorldConfig& cfg) : config(cfg) {
         initialize_noise_generators();
@@ -94,6 +95,13 @@ public:
         cloud_noise.SetFractalOctaves(3);
         cloud_noise.SetFrequency(0.005f * config.world_scale);
         cloud_noise.SetSeed(static_cast<int>(config.seed + 5000));
+        
+        // Weather variation noise - for temporal changes in weather patterns
+        weather_noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        weather_noise.SetFractalType(FastNoiseLite::FractalType_FBm);
+        weather_noise.SetFractalOctaves(2);
+        weather_noise.SetFrequency(0.008f * config.world_scale); // Coarser for broad weather systems
+        weather_noise.SetSeed(static_cast<int>(config.seed + 6000));
     }
     
     // Convert geographic coordinates to world space for noise sampling
@@ -328,9 +336,12 @@ public:
         // Hour angle: 0° at solar noon (12:00), ±15° per hour
         float hour_angle = (local_solar_time - 12.0f) * 15.0f; // degrees
         
-        // Solar declination (axial tilt effect - simplified to equinox, 0° for now)
-        // Could add seasonal variation based on day of year
-        float solar_declination = 0.0f; // degrees
+        // Solar declination (axial tilt effect based on day of year)
+        // Earth's axial tilt is 23.44°
+        // Day 0 = January 1, Day 172 = Summer solstice (June 21), Day 355 = Winter solstice (Dec 21)
+        // Using simplified formula: declination peaks at solstices
+        float day_angle = (config.day_of_year - 172) * 2.0f * M_PI / 365.0f;
+        float solar_declination = 23.44f * std::cos(day_angle); // degrees
         
         // Convert to radians for trig
         float lat_rad = latitude * M_PI / 180.0f;
@@ -421,6 +432,102 @@ public:
         return std::clamp(cloud_density, 0.0f, 1.0f);
     }
     
+    float get_vegetation_density(float longitude, float latitude, float altitude) const {
+        // Get environmental factors
+        float temp = get_temperature(longitude, latitude, altitude);
+        float precip = get_precipitation(longitude, latitude, altitude);
+        BiomeType biome = classify_biome(longitude, latitude, altitude);
+        
+        // Base density on biome type
+        float base_density = 0.0f;
+        switch (biome) {
+            // Dense vegetation
+            case BiomeType::TROPICAL_RAINFOREST:
+                base_density = 1.0f;
+                break;
+            case BiomeType::TEMPERATE_RAINFOREST:
+                base_density = 0.95f;
+                break;
+            case BiomeType::TROPICAL_SEASONAL_FOREST:
+                base_density = 0.85f;
+                break;
+            case BiomeType::TEMPERATE_DECIDUOUS_FOREST:
+                base_density = 0.80f;
+                break;
+            case BiomeType::TAIGA:
+                base_density = 0.70f;
+                break;
+            case BiomeType::MOUNTAIN_FOREST:
+                base_density = 0.65f;
+                break;
+                
+            // Moderate vegetation
+            case BiomeType::SAVANNA:
+                base_density = 0.40f;
+                break;
+            case BiomeType::GRASSLAND:
+                base_density = 0.30f;
+                break;
+                
+            // Sparse vegetation
+            case BiomeType::TUNDRA:
+            case BiomeType::MOUNTAIN_TUNDRA:
+                base_density = 0.15f;
+                break;
+                
+            // Very sparse/no vegetation
+            case BiomeType::DESERT:
+            case BiomeType::COLD_DESERT:
+                base_density = 0.05f;
+                break;
+            case BiomeType::ICE:
+            case BiomeType::SNOW:
+            case BiomeType::MOUNTAIN_PEAK:
+                base_density = 0.0f;
+                break;
+            case BiomeType::OCEAN:
+            case BiomeType::DEEP_OCEAN:
+                base_density = 0.0f; // Could represent phytoplankton if needed
+                break;
+            case BiomeType::BEACH:
+                base_density = 0.10f;
+                break;
+        }
+        
+        // Modulate by precipitation (more water = more plants)
+        float precip_factor = std::clamp(precip / 1500.0f, 0.3f, 1.2f);
+        base_density *= precip_factor;
+        
+        // Temperature affects growth
+        float temp_factor = 1.0f;
+        if (temp < -10.0f) {
+            temp_factor = 0.3f; // Very cold limits growth
+        } else if (temp < 0.0f) {
+            temp_factor = 0.6f; // Cold reduces growth
+        } else if (temp > 35.0f) {
+            temp_factor = 0.7f; // Very hot without enough water limits growth
+        }
+        base_density *= temp_factor;
+        
+        // Elevation affects vegetation (higher = less vegetation)
+        if (altitude > 3000.0f) {
+            base_density *= 0.3f;
+        } else if (altitude > 2000.0f) {
+            base_density *= 0.6f;
+        }
+        
+        // Add some noise variation for natural appearance
+        float x, y, z;
+        geo_to_world(longitude, latitude, x, y, z);
+        float noise = moisture_noise.GetNoise(x * 2.0f, y * 2.0f, z * 2.0f);
+        noise = (noise + 1.0f) * 0.5f; // 0-1
+        
+        // Noise adds ±15% variation
+        base_density *= (0.85f + noise * 0.3f);
+        
+        return std::clamp(base_density, 0.0f, 1.0f);
+    }
+    
     float get_moisture(float longitude, float latitude) const {
         float x, y, z;
         geo_to_world(longitude, latitude, x, y, z);
@@ -459,6 +566,50 @@ public:
         return base_temp + variation;
     }
     
+    float get_temperature_at_time(float longitude, float latitude, float altitude, float current_time) const {
+        // Start with base temperature
+        float base_temp = get_temperature(longitude, latitude, altitude);
+        
+        // Get insolation for solar heating effect
+        float insolation = get_insolation(longitude, latitude, current_time);
+        
+        // Insolation effect: more sun = warmer (up to +15°C during peak day)
+        // At 1000 W/m², add about +10°C; scales with insolation
+        float solar_heating = (insolation / 1000.0f) * 10.0f;
+        
+        // Night cooling: when sun is down, temperature drops
+        bool is_day = is_daylight(longitude, latitude, current_time);
+        float night_cooling = 0.0f;
+        if (!is_day) {
+            // Night time - temperature drops by 5-15°C depending on cloud cover
+            float cloud_density = get_cloud_density(longitude, latitude, altitude);
+            // More clouds = less cooling (greenhouse effect)
+            night_cooling = -5.0f - (10.0f * (1.0f - cloud_density));
+        }
+        
+        // Cloud cooling during day: clouds block sun and reduce temperature
+        float cloud_density = get_cloud_density(longitude, latitude, altitude);
+        float cloud_effect = 0.0f;
+        if (is_day) {
+            // Dense clouds can reduce temperature by up to 5°C during day
+            cloud_effect = -cloud_density * 5.0f;
+        }
+        
+        // Combine all effects
+        float dynamic_temp = base_temp + solar_heating + night_cooling + cloud_effect;
+        
+        // Daily temperature variation also depends on terrain and moisture
+        // Deserts have high variation, humid areas have lower variation
+        float humidity = get_humidity(longitude, latitude, altitude);
+        float variation_damping = 0.5f + humidity * 0.5f; // Humidity reduces temperature swings
+        
+        // Apply damping to the dynamic components
+        float dynamic_component = solar_heating + night_cooling + cloud_effect;
+        dynamic_temp = base_temp + (dynamic_component * variation_damping);
+        
+        return dynamic_temp;
+    }
+    
     float get_precipitation(float longitude, float latitude, float altitude) const {
         float moisture = get_moisture(longitude, latitude);
         float temp = get_temperature(longitude, latitude, altitude);
@@ -481,6 +632,35 @@ public:
         }
         
         return std::clamp(base_precip, 0.0f, 4000.0f);
+    }
+    
+    float get_current_precipitation(float longitude, float latitude, float altitude, float current_time) const {
+        // Get base precipitation (annual average)
+        float base_precip = get_precipitation(longitude, latitude, altitude);
+        
+        // Use time as 4th dimension for weather system movement
+        // Time scale: weather systems move slowly (scaled by 0.01)
+        float time_scaled = current_time * 0.1f; // Slower weather movement
+        
+        float x, y, z;
+        geo_to_world(longitude, latitude, x, y, z);
+        
+        // Sample weather noise with time component
+        float weather_variation = weather_noise.GetNoise(x, y, z + time_scaled * 100.0f);
+        weather_variation = (weather_variation + 1.0f) * 0.5f; // 0-1
+        
+        // Convert annual precipitation to instantaneous rate (0-1 scale)
+        // High base precip = more likely to be raining right now
+        float rain_probability = std::clamp(base_precip / 3000.0f, 0.0f, 0.8f);
+        
+        // Weather system determines if it's actually raining
+        // Some variation around the probability
+        float is_raining = (weather_variation < rain_probability + 0.3f) ? 1.0f : 0.0f;
+        
+        // Intensity varies with weather pattern
+        float intensity = weather_variation * weather_variation; // 0-1, biased toward lighter rain
+        
+        return is_raining * intensity;
     }
     
     float get_air_pressure(float altitude) const {
@@ -552,6 +732,26 @@ public:
         return std::clamp(wind_speed, 0.0f, 30.0f);
     }
     
+    float get_current_wind_speed(float longitude, float latitude, float altitude, float current_time) const {
+        // Get base wind speed
+        float base_wind = get_wind_speed(longitude, latitude, altitude);
+        
+        // Add temporal variation for gusts and weather systems
+        float time_scaled = current_time * 0.2f; // Faster variation for wind
+        
+        float x, y, z;
+        geo_to_world(longitude, latitude, x, y, z);
+        
+        // Weather noise affects wind speed
+        float weather_var = weather_noise.GetNoise(x, y, z + time_scaled * 50.0f);
+        weather_var = (weather_var + 1.0f) * 0.5f; // 0-1
+        
+        // Wind can vary ±50% from base
+        float variation_factor = 0.5f + weather_var;
+        
+        return std::clamp(base_wind * variation_factor, 0.0f, 40.0f);
+    }
+    
     float get_wind_direction(float longitude, float latitude, float altitude) const {
         float x, y, z;
         geo_to_world(longitude, latitude, x, y, z);
@@ -581,6 +781,30 @@ public:
         while (base_direction >= 360.0f) base_direction -= 360.0f;
         
         return base_direction;
+    }
+    
+    float get_current_wind_direction(float longitude, float latitude, float altitude, float current_time) const {
+        // Get base wind direction
+        float base_dir = get_wind_direction(longitude, latitude, altitude);
+        
+        // Add temporal variation for shifting winds
+        float time_scaled = current_time * 0.15f;
+        
+        float x, y, z;
+        geo_to_world(longitude, latitude, x, y, z);
+        
+        // Weather system affects wind direction
+        float weather_var = weather_noise.GetNoise(x * 1.5f, y * 1.5f, z * 1.5f + time_scaled * 30.0f);
+        
+        // Wind direction can shift ±45° from base
+        float direction_shift = weather_var * 45.0f;
+        float current_dir = base_dir + direction_shift;
+        
+        // Normalize to 0-360
+        while (current_dir < 0.0f) current_dir += 360.0f;
+        while (current_dir >= 360.0f) current_dir -= 360.0f;
+        
+        return current_dir;
     }
     
     // Calculate flow accumulation based on terrain gradient
@@ -790,12 +1014,20 @@ float World::get_temperature(float longitude, float latitude, float altitude) co
     return pimpl_->get_temperature(longitude, latitude, altitude);
 }
 
+float World::get_temperature_at_time(float longitude, float latitude, float altitude, float current_time) const {
+    return pimpl_->get_temperature_at_time(longitude, latitude, altitude, current_time);
+}
+
 float World::get_terrain_height(float longitude, float latitude, float detail_level) const {
     return pimpl_->get_terrain_height(longitude, latitude, detail_level);
 }
 
 float World::get_precipitation(float longitude, float latitude, float altitude) const {
     return pimpl_->get_precipitation(longitude, latitude, altitude);
+}
+
+float World::get_current_precipitation(float longitude, float latitude, float altitude, float current_time) const {
+    return pimpl_->get_current_precipitation(longitude, latitude, altitude, current_time);
 }
 
 PrecipitationType World::get_precipitation_type(float longitude, float latitude, float altitude) const {
@@ -828,8 +1060,16 @@ float World::get_wind_speed(float longitude, float latitude, float altitude) con
     return pimpl_->get_wind_speed(longitude, latitude, altitude);
 }
 
+float World::get_current_wind_speed(float longitude, float latitude, float altitude, float current_time) const {
+    return pimpl_->get_current_wind_speed(longitude, latitude, altitude, current_time);
+}
+
 float World::get_wind_direction(float longitude, float latitude, float altitude) const {
     return pimpl_->get_wind_direction(longitude, latitude, altitude);
+}
+
+float World::get_current_wind_direction(float longitude, float latitude, float altitude, float current_time) const {
+    return pimpl_->get_current_wind_direction(longitude, latitude, altitude, current_time);
 }
 
 bool World::is_river(float longitude, float latitude) const {
@@ -870,6 +1110,10 @@ bool World::is_daylight(float longitude, float latitude, float current_time) con
 
 float World::get_solar_angle(float longitude, float latitude, float current_time) const {
     return pimpl_->get_solar_angle(longitude, latitude, current_time);
+}
+
+float World::get_vegetation_density(float longitude, float latitude, float altitude) const {
+    return pimpl_->get_vegetation_density(longitude, latitude, altitude);
 }
 
 void World::set_config(const WorldConfig& config) {
