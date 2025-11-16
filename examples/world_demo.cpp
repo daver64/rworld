@@ -10,6 +10,7 @@
 #ifdef USE_SDL2_TTF
 #include <SDL2/SDL_ttf.h>
 #endif
+#include "../third_party/FastNoiseLite.h"
 #endif
 
 using namespace rworld;
@@ -231,7 +232,8 @@ enum class DisplayMode {
     BIOMES,
     ELEVATION,
     TEMPERATURE,
-    PRECIPITATION
+    PRECIPITATION,
+    CLOUDS
 };
 
 #ifdef USE_SDL2_TTF
@@ -295,6 +297,70 @@ struct TextRenderer {
 };
 #endif
 
+// Cloud layer generator
+struct CloudLayer {
+    FastNoiseLite cloud_noise;
+    uint64_t seed;
+    const World* world_ptr; // Pointer to world for weather data
+    
+    CloudLayer(uint64_t world_seed, const World* world) : seed(world_seed), world_ptr(world) {
+        cloud_noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        cloud_noise.SetFractalType(FastNoiseLite::FractalType_FBm);
+        cloud_noise.SetFractalOctaves(3);
+        cloud_noise.SetFrequency(0.005f);
+        cloud_noise.SetSeed(static_cast<int>(world_seed + 5000));
+    }
+    
+    // Get cloud density at a location (0 = clear, 1 = dense clouds)
+    float get_cloud_density(float longitude, float latitude) const {
+        // Convert to 3D coordinates on sphere
+        float lon_rad = longitude * 3.14159265359f / 180.0f;
+        float lat_rad = latitude * 3.14159265359f / 180.0f;
+        float r = 1000.0f;
+        float x = r * std::cos(lat_rad) * std::cos(lon_rad);
+        float y = r * std::cos(lat_rad) * std::sin(lon_rad);
+        float z = r * std::sin(lat_rad);
+        
+        // Get base noise pattern for cloud variation
+        float noise = cloud_noise.GetNoise(x, y, z);
+        noise = (noise + 1.0f) * 0.5f; // Convert from -1,1 to 0,1
+        
+        // Get world weather data
+        float terrain_height = world_ptr->get_terrain_height(longitude, latitude, 1.0f);
+        float altitude = std::max(terrain_height, 0.0f);
+        float temperature = world_ptr->get_temperature(longitude, latitude, altitude);
+        float humidity = world_ptr->get_humidity(longitude, latitude, altitude);
+        float precipitation = world_ptr->get_precipitation(longitude, latitude, altitude);
+        
+        // Cloud density is heavily influenced by humidity
+        float cloud_base = humidity * 0.8f + 0.2f * noise;
+        
+        // High precipitation areas have more clouds
+        float precip_factor = std::clamp(precipitation / 2000.0f, 0.0f, 1.0f);
+        cloud_base = cloud_base * 0.6f + precip_factor * 0.4f;
+        
+        // Temperature affects cloud formation
+        // Moderate temperatures (10-25°C) have more clouds
+        float temp_factor = 1.0f;
+        if (temperature < -10.0f) {
+            temp_factor = 0.5f; // Very cold = less clouds
+        } else if (temperature > 35.0f) {
+            temp_factor = 0.7f; // Very hot/dry = fewer clouds
+        } else if (temperature >= 10.0f && temperature <= 25.0f) {
+            temp_factor = 1.2f; // Optimal for cloud formation
+        }
+        cloud_base *= temp_factor;
+        
+        // Add noise variation for patchiness
+        float cloud_density = cloud_base * noise;
+        
+        // Make clouds more patchy
+        cloud_density = std::pow(cloud_density, 1.2f);
+        
+        return std::clamp(cloud_density, 0.0f, 1.0f);
+    }
+};
+
 struct ViewState {
     float center_lon = 0.0f;      // Center longitude of view
     float center_lat = 0.0f;      // Center latitude of view
@@ -323,6 +389,26 @@ struct ViewState {
         while (lon < -180.0f) lon += 360.0f;
     }
 };
+
+void render_cloud_overlay(SDL_Renderer* renderer, const CloudLayer& clouds,
+                          int width, int height, const ViewState& view) {
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            float lon, lat;
+            view.screen_to_world(x, y, width, height, lon, lat);
+            
+            float density = clouds.get_cloud_density(lon, lat);
+            
+            // Only draw clouds where density is significant
+            if (density > 0.3f) {
+                uint8_t alpha = static_cast<uint8_t>((density - 0.3f) / 0.7f * 180.0f);
+                SDL_SetRenderDrawColor(renderer, 255, 255, 255, alpha);
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                SDL_RenderDrawPoint(renderer, x, y);
+            }
+        }
+    }
+}
 
 void render_world_map(SDL_Renderer* renderer, const World& world, 
                       int width, int height, DisplayMode mode, const ViewState& view) {
@@ -362,6 +448,14 @@ void render_world_map(SDL_Renderer* renderer, const World& world,
                     float altitude = std::max(terrain_height, 0.0f);
                     float precip = world.get_precipitation(lon, lat, altitude);
                     color = get_precipitation_color(precip);
+                    break;
+                }
+                case DisplayMode::CLOUDS: {
+                    // Show base biome map
+                    float terrain_height = world.get_terrain_height(lon, lat, 1.0f);
+                    float altitude = std::max(terrain_height, 0.0f);
+                    BiomeType biome = world.get_biome(lon, lat, altitude);
+                    color = get_biome_color(biome);
                     break;
                 }
             }
@@ -496,6 +590,7 @@ void render_info_panel(SDL_Renderer* renderer, const World& world,
             case DisplayMode::ELEVATION: mode_text = "Mode: Elevation (2)"; break;
             case DisplayMode::TEMPERATURE: mode_text = "Mode: Temperature (3)"; break;
             case DisplayMode::PRECIPITATION: mode_text = "Mode: Precipitation (4)"; break;
+            case DisplayMode::CLOUDS: mode_text = "Mode: Clouds (5)"; break;
         }
         text_renderer->draw_text(renderer, mode_text, 20, map_height - 33, white);
     }
@@ -549,19 +644,21 @@ void run_sdl_demo(World& world) {
     std::cout << "  2 - Show Elevation\n";
     std::cout << "  3 - Show Temperature\n";
     std::cout << "  4 - Show Precipitation\n";
+    std::cout << "  5 - Show Clouds\n";
     std::cout << "  R - Regenerate world (new seed)\n";
     std::cout << "  Mouse Wheel - Zoom in/out at cursor position\n";
     std::cout << "  ESC/Q - Quit\n";
     std::cout << "  Mouse - Hover to see location details\n";
     std::cout << "\nGenerating world map...\n";
     
+    WorldConfig config = world.get_config();
+    
     DisplayMode current_mode = DisplayMode::BIOMES;
     ViewState view_state;
+    CloudLayer clouds(config.seed, &world);
     bool need_redraw = true;
     bool running = true;
     int mouse_x = 0, mouse_y = 0;
-    
-    WorldConfig config = world.get_config();
     
     while (running) {
         SDL_Event event;
@@ -594,9 +691,15 @@ void run_sdl_demo(World& world) {
                         need_redraw = true;
                         std::cout << "Display mode: Precipitation\n";
                         break;
+                    case SDLK_5:
+                        current_mode = DisplayMode::CLOUDS;
+                        need_redraw = true;
+                        std::cout << "Display mode: Clouds\n";
+                        break;
                     case SDLK_r:
                         config.seed = static_cast<uint64_t>(SDL_GetTicks64());
                         world.set_config(config);
+                        clouds = CloudLayer(config.seed, &world); // Regenerate clouds too
                         view_state = ViewState(); // Reset view
                         need_redraw = true;
                         std::cout << "Regenerating world with seed " << config.seed << "\n";
@@ -654,6 +757,12 @@ void run_sdl_demo(World& world) {
             SDL_RenderClear(renderer);
             
             render_world_map(renderer, world, WINDOW_WIDTH, WINDOW_HEIGHT, current_mode, view_state);
+            
+            // Add cloud overlay if in clouds mode
+            if (current_mode == DisplayMode::CLOUDS) {
+                render_cloud_overlay(renderer, clouds, WINDOW_WIDTH, WINDOW_HEIGHT, view_state);
+            }
+            
             need_redraw = false;
             
             std::cout << "World map rendered.\n";
