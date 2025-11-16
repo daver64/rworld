@@ -234,7 +234,11 @@ enum class DisplayMode {
     TEMPERATURE,
     PRECIPITATION,
     CLOUDS,
-    RIVERS
+    RIVERS,
+    COAL,
+    IRON,
+    OIL,
+    INSOLATION
 };
 
 #ifdef USE_SDL2_TTF
@@ -366,6 +370,8 @@ struct ViewState {
     float center_lon = 0.0f;      // Center longitude of view
     float center_lat = 0.0f;      // Center latitude of view
     float zoom = 1.0f;            // Zoom level (1.0 = whole world, higher = more zoomed in)
+    float current_time = 12.0f;   // Time of day in hours (0-24)
+    bool time_paused = true;      // Whether time advances automatically
     
     // Convert screen coordinates to world coordinates
     void screen_to_world(int screen_x, int screen_y, int width, int height, 
@@ -469,6 +475,67 @@ void render_world_map(SDL_Renderer* renderer, const World& world,
                         float flow = world.get_flow_accumulation(lon, lat);
                         uint8_t blue_intensity = static_cast<uint8_t>(100 + flow * 155);
                         color = {0, 100, blue_intensity};
+                    }
+                    break;
+                }
+                case DisplayMode::COAL: {
+                    // Show coal deposits on elevation map
+                    float height = world.get_terrain_height(lon, lat, view.zoom);
+                    color = get_height_color(height);
+                    
+                    // Overlay coal in black/gray
+                    float coal = world.get_coal_deposit(lon, lat);
+                    if (coal > 0.3f) {
+                        uint8_t intensity = static_cast<uint8_t>(255 * (1.0f - coal * 0.8f));
+                        uint8_t dark = static_cast<uint8_t>(intensity / 3);
+                        color = {dark, dark, dark};
+                    }
+                    break;
+                }
+                case DisplayMode::IRON: {
+                    // Show iron deposits on elevation map
+                    float height = world.get_terrain_height(lon, lat, view.zoom);
+                    color = get_height_color(height);
+                    
+                    // Overlay iron in rust red/brown
+                    float iron = world.get_iron_deposit(lon, lat);
+                    if (iron > 0.3f) {
+                        uint8_t red = static_cast<uint8_t>(139 + iron * 70);
+                        uint8_t brown = static_cast<uint8_t>(69 + iron * 40);
+                        color = {red, brown, static_cast<uint8_t>(brown / 2)};
+                    }
+                    break;
+                }
+                case DisplayMode::OIL: {
+                    // Show oil deposits on elevation map
+                    float height = world.get_terrain_height(lon, lat, view.zoom);
+                    color = get_height_color(height);
+                    
+                    // Overlay oil in dark green/black
+                    float oil = world.get_oil_deposit(lon, lat);
+                    if (oil > 0.3f) {
+                        uint8_t darkness = static_cast<uint8_t>(50 * (1.0f - oil));
+                        uint8_t green = static_cast<uint8_t>(darkness + oil * 80);
+                        color = {darkness, green, darkness};
+                    }
+                    break;
+                }
+                case DisplayMode::INSOLATION: {
+                    // Show solar radiation based on time of day
+                    float insolation = world.get_insolation(lon, lat, view.current_time);
+                    
+                    // Color based on insolation level (0-1400 W/m²)
+                    float normalized = std::clamp(insolation / 1000.0f, 0.0f, 1.4f);
+                    
+                    if (normalized == 0.0f) {
+                        // Night - dark blue/black
+                        color = {10, 10, 30};
+                    } else {
+                        // Day - yellow to white based on intensity
+                        uint8_t r = static_cast<uint8_t>(50 + normalized * 205);
+                        uint8_t g = static_cast<uint8_t>(50 + normalized * 205);
+                        uint8_t b = static_cast<uint8_t>(normalized * 100);
+                        color = {r, g, b};
                     }
                     break;
                 }
@@ -589,6 +656,54 @@ void render_info_panel(SDL_Renderer* renderer, const World& world,
         if (world.is_volcano(lon, lat)) {
             snprintf(buffer, sizeof(buffer), "VOLCANO");
             text_renderer->draw_text(renderer, buffer, 20, text_y, SDL_Color{255, 100, 50, 255});
+            text_y += 20;
+        }
+        
+        // Mineral resources
+        float coal = world.get_coal_deposit(lon, lat);
+        float iron = world.get_iron_deposit(lon, lat);
+        float oil = world.get_oil_deposit(lon, lat);
+        
+        if (coal > 0.3f) {
+            snprintf(buffer, sizeof(buffer), "Coal: %d%%", static_cast<int>(coal * 100));
+            text_renderer->draw_text(renderer, buffer, 20, text_y, SDL_Color{80, 80, 80, 255});
+            text_y += 20;
+        }
+        
+        if (iron > 0.3f) {
+            snprintf(buffer, sizeof(buffer), "Iron Ore: %d%%", static_cast<int>(iron * 100));
+            text_renderer->draw_text(renderer, buffer, 20, text_y, SDL_Color{209, 109, 60, 255});
+            text_y += 20;
+        }
+        
+        if (oil > 0.3f) {
+            snprintf(buffer, sizeof(buffer), "Oil: %d%%", static_cast<int>(oil * 100));
+            text_renderer->draw_text(renderer, buffer, 20, text_y, SDL_Color{50, 130, 50, 255});
+            text_y += 20;
+        }
+        
+        // Insolation and time info
+        float insolation = world.get_insolation(lon, lat, view.current_time);
+        bool is_day = world.is_daylight(lon, lat, view.current_time);
+        float solar_angle = world.get_solar_angle(lon, lat, view.current_time);
+        
+        snprintf(buffer, sizeof(buffer), "Time: %02d:%02d %s", 
+                 static_cast<int>(view.current_time), 
+                 static_cast<int>((view.current_time - static_cast<int>(view.current_time)) * 60),
+                 view.time_paused ? "[PAUSED]" : "");
+        text_renderer->draw_text(renderer, buffer, 20, text_y, SDL_Color{200, 200, 255, 255});
+        text_y += 20;
+        
+        snprintf(buffer, sizeof(buffer), "Insolation: %.0f W/m%c", insolation, 178); // ² symbol
+        text_renderer->draw_text(renderer, buffer, 20, text_y, 
+                                is_day ? SDL_Color{255, 255, 100, 255} : SDL_Color{100, 100, 150, 255});
+        text_y += 20;
+        
+        if (is_day) {
+            snprintf(buffer, sizeof(buffer), "Solar Angle: %.1f%c", solar_angle, 176); // ° symbol
+            text_renderer->draw_text(renderer, buffer, 20, text_y, SDL_Color{255, 200, 100, 255});
+        } else {
+            text_renderer->draw_text(renderer, "Night", 20, text_y, SDL_Color{100, 100, 150, 255});
         }
     } else
 #endif
@@ -642,6 +757,10 @@ void render_info_panel(SDL_Renderer* renderer, const World& world,
             case DisplayMode::PRECIPITATION: mode_text = "Mode: Precipitation (4)"; break;
             case DisplayMode::CLOUDS: mode_text = "Mode: Clouds (5)"; break;
             case DisplayMode::RIVERS: mode_text = "Mode: Rivers (6)"; break;
+            case DisplayMode::COAL: mode_text = "Mode: Coal (7)"; break;
+            case DisplayMode::IRON: mode_text = "Mode: Iron (8)"; break;
+            case DisplayMode::OIL: mode_text = "Mode: Oil (9)"; break;
+            case DisplayMode::INSOLATION: mode_text = "Mode: Insolation (0)"; break;
         }
         text_renderer->draw_text(renderer, mode_text, 20, map_height - 33, white);
     }
@@ -697,6 +816,12 @@ void run_sdl_demo(World& world) {
     std::cout << "  4 - Show Precipitation\n";
     std::cout << "  5 - Show Clouds\n";
     std::cout << "  6 - Show Rivers\n";
+    std::cout << "  7 - Show Coal Deposits\n";
+    std::cout << "  8 - Show Iron Deposits\n";
+    std::cout << "  9 - Show Oil Deposits\n";
+    std::cout << "  0 - Show Insolation (Day/Night)\n";
+    std::cout << "  SPACE - Pause/Resume time\n";
+    std::cout << "  [ / ] - Decrease/Increase time\n";
     std::cout << "  R - Regenerate world (new seed)\n";
     std::cout << "  Mouse Wheel - Zoom in/out at cursor position\n";
     std::cout << "  ESC/Q - Quit\n";
@@ -752,6 +877,42 @@ void run_sdl_demo(World& world) {
                         current_mode = DisplayMode::RIVERS;
                         need_redraw = true;
                         std::cout << "Display mode: Rivers\n";
+                        break;
+                    case SDLK_7:
+                        current_mode = DisplayMode::COAL;
+                        need_redraw = true;
+                        std::cout << "Display mode: Coal Deposits\n";
+                        break;
+                    case SDLK_8:
+                        current_mode = DisplayMode::IRON;
+                        need_redraw = true;
+                        std::cout << "Display mode: Iron Deposits\n";
+                        break;
+                    case SDLK_9:
+                        current_mode = DisplayMode::OIL;
+                        need_redraw = true;
+                        std::cout << "Display mode: Oil Deposits\n";
+                        break;
+                    case SDLK_0:
+                        current_mode = DisplayMode::INSOLATION;
+                        need_redraw = true;
+                        std::cout << "Display mode: Insolation (Time: " << view_state.current_time << "h)\n";
+                        break;
+                    case SDLK_SPACE:
+                        view_state.time_paused = !view_state.time_paused;
+                        std::cout << "Time " << (view_state.time_paused ? "paused" : "running") << "\n";
+                        break;
+                    case SDLK_LEFTBRACKET: // [ key - decrease time
+                        view_state.current_time -= 0.5f;
+                        if (view_state.current_time < 0.0f) view_state.current_time += 24.0f;
+                        need_redraw = true;
+                        std::cout << "Time: " << view_state.current_time << "h\n";
+                        break;
+                    case SDLK_RIGHTBRACKET: // ] key - increase time
+                        view_state.current_time += 0.5f;
+                        if (view_state.current_time >= 24.0f) view_state.current_time -= 24.0f;
+                        need_redraw = true;
+                        std::cout << "Time: " << view_state.current_time << "h\n";
                         break;
                     case SDLK_r:
                         config.seed = static_cast<uint64_t>(SDL_GetTicks64());
@@ -834,6 +995,19 @@ void run_sdl_demo(World& world) {
                          );
         
         SDL_RenderPresent(renderer);
+        
+        // Advance time if not paused
+        if (!view_state.time_paused) {
+            view_state.current_time += 0.01f; // Advance by ~36 seconds per frame
+            if (view_state.current_time >= 24.0f) {
+                view_state.current_time -= 24.0f;
+            }
+            // Redraw if showing insolation (day/night changes)
+            if (current_mode == DisplayMode::INSOLATION) {
+                need_redraw = true;
+            }
+        }
+        
         SDL_Delay(16); // ~60 FPS
     }
     

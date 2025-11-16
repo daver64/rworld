@@ -15,6 +15,10 @@ public:
     FastNoiseLite wind_noise;
     FastNoiseLite river_noise;
     FastNoiseLite volcano_noise;
+    FastNoiseLite coal_noise;
+    FastNoiseLite iron_noise;
+    FastNoiseLite oil_noise;
+    FastNoiseLite cloud_noise;
     
     explicit Impl(const WorldConfig& cfg) : config(cfg) {
         initialize_noise_generators();
@@ -62,6 +66,34 @@ public:
         volcano_noise.SetCellularReturnType(FastNoiseLite::CellularReturnType_Distance);
         volcano_noise.SetFrequency(0.008f * config.world_scale);
         volcano_noise.SetSeed(static_cast<int>(config.seed + 5000));
+        
+        // Coal noise - for coal deposits (sedimentary, lowland swamps)
+        coal_noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        coal_noise.SetFractalType(FastNoiseLite::FractalType_FBm);
+        coal_noise.SetFractalOctaves(4);
+        coal_noise.SetFrequency(0.003f * config.world_scale);
+        coal_noise.SetSeed(static_cast<int>(config.seed + 6000));
+        
+        // Iron noise - for iron ore deposits (volcanic/ancient seabeds)
+        iron_noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        iron_noise.SetFractalType(FastNoiseLite::FractalType_Ridged);
+        iron_noise.SetFractalOctaves(3);
+        iron_noise.SetFrequency(0.004f * config.world_scale);
+        iron_noise.SetSeed(static_cast<int>(config.seed + 7000));
+        
+        // Oil noise - for oil deposits (sedimentary basins)
+        oil_noise.SetNoiseType(FastNoiseLite::NoiseType_Cellular);
+        oil_noise.SetCellularDistanceFunction(FastNoiseLite::CellularDistanceFunction_Euclidean);
+        oil_noise.SetCellularReturnType(FastNoiseLite::CellularReturnType_Distance2);
+        oil_noise.SetFrequency(0.003f * config.world_scale);
+        oil_noise.SetSeed(static_cast<int>(config.seed + 4000));
+        
+        // Cloud noise - for atmospheric modeling
+        cloud_noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        cloud_noise.SetFractalType(FastNoiseLite::FractalType_FBm);
+        cloud_noise.SetFractalOctaves(3);
+        cloud_noise.SetFrequency(0.005f * config.world_scale);
+        cloud_noise.SetSeed(static_cast<int>(config.seed + 5000));
     }
     
     // Convert geographic coordinates to world space for noise sampling
@@ -177,6 +209,216 @@ public:
         
         // Location is a volcano if within the cone radius
         return volcano_cell < 0.2f;
+    }
+    
+    float get_coal_deposit(float longitude, float latitude) const {
+        float terrain_height = get_terrain_height(longitude, latitude);
+        
+        // No coal in ocean or very high mountains
+        if (terrain_height <= config.sea_level || terrain_height > 2000.0f) {
+            return 0.0f;
+        }
+        
+        float x, y, z;
+        geo_to_world(longitude, latitude, x, y, z);
+        
+        // Coal forms in ancient swamps - prefer wet, vegetated lowlands
+        float coal_noise_value = coal_noise.GetNoise(x, y, z);
+        coal_noise_value = (coal_noise_value + 1.0f) * 0.5f; // 0-1
+        
+        // Coal more likely in areas with:
+        // - Moderate elevation (50-1200m - ancient swamps and forests)
+        float elevation_factor = 0.0f;
+        if (terrain_height >= 50.0f && terrain_height <= 1200.0f) {
+            elevation_factor = 1.0f - std::abs(terrain_height - 500.0f) / 700.0f;
+            elevation_factor = std::max(0.3f, elevation_factor); // Minimum factor of 0.3
+        }
+        
+        // - High historical precipitation (ancient forests/swamps)
+        float altitude = std::max(terrain_height, 0.0f);
+        float precip = get_precipitation(longitude, latitude, altitude);
+        float moisture_factor = std::clamp(precip / 1500.0f, 0.2f, 1.0f); // Minimum 0.2
+        
+        // - Temperate to tropical latitudes
+        float lat_factor = 1.0f - std::abs(latitude) / 90.0f; // Higher at equator
+        
+        // Boost coal concentration overall
+        float coal = coal_noise_value * elevation_factor * moisture_factor * (0.5f + lat_factor * 0.5f);
+        coal = std::pow(coal, 0.7f); // Make deposits more concentrated
+        return std::clamp(coal * 1.3f, 0.0f, 1.0f);
+    }
+    
+    float get_iron_deposit(float longitude, float latitude) const {
+        float terrain_height = get_terrain_height(longitude, latitude);
+        
+        // Iron can be anywhere on land
+        if (terrain_height <= config.sea_level) {
+            return 0.0f;
+        }
+        
+        float x, y, z;
+        geo_to_world(longitude, latitude, x, y, z);
+        
+        // Iron forms in banded iron formations and volcanic regions
+        float iron_noise_value = iron_noise.GetNoise(x, y, z);
+        iron_noise_value = (iron_noise_value + 1.0f) * 0.5f; // 0-1
+        
+        // Iron more likely in:
+        // - Volcanic regions (smaller bonus)
+        float volcano_bonus = is_volcano(longitude, latitude) ? 0.25f : 0.0f;
+        
+        // - Ancient seabeds (low-mid elevation)
+        float elevation_factor = 0.3f;
+        if (terrain_height < 500.0f) {
+            elevation_factor = 0.8f;
+        } else if (terrain_height < 1000.0f) {
+            elevation_factor = 0.6f;
+        }
+        
+        // - Areas with geological activity (use ridged noise pattern)
+        // Square the noise to make deposits more rare and concentrated
+        float iron = (iron_noise_value * iron_noise_value) * elevation_factor + volcano_bonus;
+        return std::clamp(iron * 0.8f, 0.0f, 1.0f);
+    }
+    
+    float get_oil_deposit(float longitude, float latitude) const {
+        float terrain_height = get_terrain_height(longitude, latitude);
+        
+        // Oil forms in sedimentary basins - prefer low elevations and ancient ocean margins
+        // Can be on land or shallow ocean
+        if (terrain_height < -1000.0f || terrain_height > 1200.0f) {
+            return 0.0f;
+        }
+        
+        float x, y, z;
+        geo_to_world(longitude, latitude, x, y, z);
+        
+        // Oil deposits using cellular pattern (basin-like structures)
+        float oil_noise_value = oil_noise.GetNoise(x, y, z);
+        oil_noise_value = (oil_noise_value + 1.0f) * 0.5f; // 0-1
+        
+        // Oil more likely in:
+        // - Sedimentary basins (valleys, lowlands, coastal areas)
+        float elevation_factor = 0.0f;
+        if (terrain_height >= -200.0f && terrain_height <= 800.0f) {
+            elevation_factor = 1.0f - std::abs(terrain_height - 200.0f) / 600.0f;
+            elevation_factor = std::max(0.3f, elevation_factor); // Minimum factor
+        }
+        
+        // - Areas that were ancient ocean (coastal/low areas)
+        float coastal_factor = terrain_height < 400.0f ? 1.3f : 0.9f;
+        
+        // - Cellular pattern creates basin-like deposits
+        oil_noise_value = std::pow(oil_noise_value, 1.2f); // Make deposits somewhat concentrated but not too rare
+        
+        float oil = oil_noise_value * elevation_factor * coastal_factor;
+        return std::clamp(oil * 1.4f, 0.0f, 1.0f);
+    }
+    
+    float get_solar_angle(float longitude, float latitude, float current_time) const {
+        // Calculate hour angle: how far the sun has moved from solar noon
+        // Solar noon is at 12:00 at longitude 0°
+        // Earth rotates 360° in 24 hours = 15° per hour
+        float local_solar_time = current_time + (longitude / 15.0f);
+        
+        // Wrap to 0-24 range
+        while (local_solar_time < 0.0f) local_solar_time += 24.0f;
+        while (local_solar_time >= 24.0f) local_solar_time -= 24.0f;
+        
+        // Hour angle: 0° at solar noon (12:00), ±15° per hour
+        float hour_angle = (local_solar_time - 12.0f) * 15.0f; // degrees
+        
+        // Solar declination (axial tilt effect - simplified to equinox, 0° for now)
+        // Could add seasonal variation based on day of year
+        float solar_declination = 0.0f; // degrees
+        
+        // Convert to radians for trig
+        float lat_rad = latitude * M_PI / 180.0f;
+        float dec_rad = solar_declination * M_PI / 180.0f;
+        float ha_rad = hour_angle * M_PI / 180.0f;
+        
+        // Solar elevation angle formula
+        float sin_elevation = std::sin(lat_rad) * std::sin(dec_rad) +
+                             std::cos(lat_rad) * std::cos(dec_rad) * std::cos(ha_rad);
+        
+        float elevation_angle = std::asin(std::clamp(sin_elevation, -1.0f, 1.0f)) * 180.0f / M_PI;
+        
+        return elevation_angle; // degrees above horizon (negative = below)
+    }
+    
+    bool is_daylight(float longitude, float latitude, float current_time) const {
+        return get_solar_angle(longitude, latitude, current_time) > 0.0f;
+    }
+    
+    float get_insolation(float longitude, float latitude, float current_time) const {
+        // Get solar angle
+        float solar_angle = get_solar_angle(longitude, latitude, current_time);
+        
+        // No insolation if sun is below horizon
+        if (solar_angle <= 0.0f) {
+            return 0.0f;
+        }
+        
+        // Solar constant at top of atmosphere
+        const float SOLAR_CONSTANT = 1361.0f; // W/m²
+        
+        // Insolation based on solar angle (cosine law)
+        float solar_angle_rad = solar_angle * M_PI / 180.0f;
+        float base_insolation = SOLAR_CONSTANT * std::sin(solar_angle_rad);
+        
+        // Atmospheric attenuation (simplified - depends on air mass)
+        // Air mass increases as sun gets lower in sky
+        float air_mass = 1.0f / std::sin(solar_angle_rad);
+        air_mass = std::clamp(air_mass, 1.0f, 10.0f);
+        
+        // Atmospheric transmission (simple exponential model)
+        float atmospheric_transmission = std::pow(0.7f, air_mass);
+        base_insolation *= atmospheric_transmission;
+        
+        // Cloud cover reduces insolation
+        float terrain_height = get_terrain_height(longitude, latitude);
+        float altitude = std::max(terrain_height, 0.0f);
+        float cloud_density = get_cloud_density(longitude, latitude, altitude);
+        
+        // Clouds block 50-90% of radiation depending on density
+        float cloud_factor = 1.0f - (cloud_density * 0.7f);
+        
+        float final_insolation = base_insolation * cloud_factor;
+        
+        return std::clamp(final_insolation, 0.0f, 1400.0f);
+    }
+    
+    float get_cloud_density(float longitude, float latitude, float altitude) const {
+        float x, y, z;
+        geo_to_world(longitude, latitude, x, y, z);
+        
+        // Get base noise pattern for cloud variation
+        float noise = cloud_noise.GetNoise(x, y, z);
+        noise = (noise + 1.0f) * 0.5f; // 0-1
+        
+        // Get environmental factors
+        float humidity = get_humidity(longitude, latitude, altitude);
+        float precip = get_precipitation(longitude, latitude, altitude);
+        float temp = get_temperature(longitude, latitude, altitude);
+        
+        // Cloud density is heavily influenced by humidity
+        float cloud_base = humidity * 0.8f + 0.2f * noise;
+        
+        // High precipitation areas have more clouds
+        float precip_factor = std::clamp(precip / 2000.0f, 0.0f, 1.0f);
+        cloud_base = cloud_base * 0.6f + precip_factor * 0.4f;
+        
+        // Temperature affects cloud formation
+        // Cold air holds less moisture, hot air more
+        float temp_factor = 1.0f;
+        if (temp < -10.0f) {
+            temp_factor = 0.5f; // Very cold - less clouds
+        } else if (temp > 25.0f) {
+            temp_factor = 1.2f; // Hot tropical - more clouds
+        }
+        
+        float cloud_density = cloud_base * temp_factor;
+        return std::clamp(cloud_density, 0.0f, 1.0f);
     }
     
     float get_moisture(float longitude, float latitude) const {
@@ -604,6 +846,30 @@ float World::get_flow_accumulation(float longitude, float latitude) const {
 
 bool World::is_volcano(float longitude, float latitude) const {
     return pimpl_->is_volcano(longitude, latitude);
+}
+
+float World::get_coal_deposit(float longitude, float latitude) const {
+    return pimpl_->get_coal_deposit(longitude, latitude);
+}
+
+float World::get_iron_deposit(float longitude, float latitude) const {
+    return pimpl_->get_iron_deposit(longitude, latitude);
+}
+
+float World::get_oil_deposit(float longitude, float latitude) const {
+    return pimpl_->get_oil_deposit(longitude, latitude);
+}
+
+float World::get_insolation(float longitude, float latitude, float current_time) const {
+    return pimpl_->get_insolation(longitude, latitude, current_time);
+}
+
+bool World::is_daylight(float longitude, float latitude, float current_time) const {
+    return pimpl_->is_daylight(longitude, latitude, current_time);
+}
+
+float World::get_solar_angle(float longitude, float latitude, float current_time) const {
+    return pimpl_->get_solar_angle(longitude, latitude, current_time);
 }
 
 void World::set_config(const WorldConfig& config) {

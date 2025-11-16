@@ -260,6 +260,78 @@ public:
     bool is_volcano(float longitude, float latitude) const;
     
     /**
+     * Get coal deposit concentration at a location
+     * 
+     * Coal forms in ancient swamps and forested lowlands.
+     * Found in sedimentary rocks at moderate depths.
+     * 
+     * @param longitude Longitude in degrees (-180 to 180)
+     * @param latitude Latitude in degrees (-90 to 90)
+     * @return Coal concentration (0-1, 0=none, 1=rich deposit)
+     */
+    float get_coal_deposit(float longitude, float latitude) const;
+    
+    /**
+     * Get iron ore deposit concentration at a location
+     * 
+     * Iron ore forms in ancient seabeds and volcanic regions.
+     * Often found in banded iron formations.
+     * 
+     * @param longitude Longitude in degrees (-180 to 180)
+     * @param latitude Latitude in degrees (-90 to 90)
+     * @return Iron ore concentration (0-1, 0=none, 1=rich deposit)
+     */
+    float get_iron_deposit(float longitude, float latitude) const;
+    
+    /**
+     * Get oil deposit concentration at a location
+     * 
+     * Oil forms in ancient ocean sediments under specific conditions.
+     * Typically found in sedimentary basins.
+     * 
+     * @param longitude Longitude in degrees (-180 to 180)
+     * @param latitude Latitude in degrees (-90 to 90)
+     * @return Oil concentration (0-1, 0=none, 1=rich deposit)
+     */
+    float get_oil_deposit(float longitude, float latitude) const;
+    
+    /**
+     * Get insolation (solar radiation) at a location
+     * 
+     * Insolation depends on:
+     * - Latitude (maximum at equator, minimum at poles)
+     * - Time of day (solar angle based on longitude and current_time)
+     * - Cloud cover (reduces insolation)
+     * - Season (axial tilt, if implemented)
+     * 
+     * @param longitude Longitude in degrees (-180 to 180)
+     * @param latitude Latitude in degrees (-90 to 90)
+     * @param current_time Time of day in hours (0-24, where 12.0 is solar noon at 0° longitude)
+     * @return Insolation in W/m² (0-1400, 0=night, ~1000=clear day at equator)
+     */
+    float get_insolation(float longitude, float latitude, float current_time) const;
+    
+    /**
+     * Check if a location is in daylight
+     * 
+     * @param longitude Longitude in degrees (-180 to 180)
+     * @param latitude Latitude in degrees (-90 to 90)
+     * @param current_time Time of day in hours (0-24, where 12.0 is solar noon at 0° longitude)
+     * @return true if the sun is above the horizon
+     */
+    bool is_daylight(float longitude, float latitude, float current_time) const;
+    
+    /**
+     * Get the solar angle above horizon at a location
+     * 
+     * @param longitude Longitude in degrees (-180 to 180)
+     * @param latitude Latitude in degrees (-90 to 90)
+     * @param current_time Time of day in hours (0-24, where 12.0 is solar noon at 0° longitude)
+     * @return Solar elevation angle in degrees (negative = below horizon)
+     */
+    float get_solar_angle(float longitude, float latitude, float current_time) const;
+    
+    /**
      * Update the world configuration
      * This will reset internal noise generators
      */

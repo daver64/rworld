@@ -54,7 +54,7 @@ cmake --build .
 
 The demo includes:
 - **With SDL2 + SDL2_ttf**: Interactive 1200x600 window with colourful visualization and text info
-- **With SDL2 only**: Graphical visualization with colour-coded indicators (no text)
+- **With SDL2 only**: Graphical visualisation with colour-coded indicators (no text)
 - **Without SDL2**: Text-based output with ASCII map and data tables
 
 ## Usage Example
