@@ -645,7 +645,7 @@ const char* soil_to_string(SoilType soil);
 
 
 #ifdef _RWORLD_IMPLEMENTATION
-#include "../third_party/FastNoiseLite.h"
+#include "FastNoiseLite.h"
 #include <cmath>
 #include <algorithm>
 
