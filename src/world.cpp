@@ -14,6 +14,7 @@ public:
     FastNoiseLite temperature_variation_noise;
     FastNoiseLite wind_noise;
     FastNoiseLite river_noise;
+    FastNoiseLite volcano_noise;
     
     explicit Impl(const WorldConfig& cfg) : config(cfg) {
         initialize_noise_generators();
@@ -54,6 +55,13 @@ public:
         river_noise.SetFractalOctaves(3);
         river_noise.SetFrequency(0.004f * config.world_scale);
         river_noise.SetSeed(static_cast<int>(config.seed + 4000));
+        
+        // Volcano noise - sparse cellular noise for volcano placement
+        volcano_noise.SetNoiseType(FastNoiseLite::NoiseType_Cellular);
+        volcano_noise.SetCellularDistanceFunction(FastNoiseLite::CellularDistanceFunction_Euclidean);
+        volcano_noise.SetCellularReturnType(FastNoiseLite::CellularReturnType_Distance);
+        volcano_noise.SetFrequency(0.008f * config.world_scale);
+        volcano_noise.SetSeed(static_cast<int>(config.seed + 5000));
     }
     
     // Convert geographic coordinates to world space for noise sampling
@@ -111,11 +119,64 @@ public:
         
         // Map to actual height range
         // Ocean: -4000m to 0m, Land: 0m to max_terrain_height
+        float base_height = 0.0f;
         if (shaped < 0.0f) {
-            return shaped * 4000.0f;
+            base_height = shaped * 4000.0f;
         } else {
-            return shaped * config.max_terrain_height;
+            base_height = shaped * config.max_terrain_height;
         }
+        
+        // Add volcanoes - only on land (independent of detail_level so always visible)
+        if (base_height > 0.0f) {
+            // Use cellular noise to find volcano centers
+            float volcano_cell = volcano_noise.GetNoise(x, y, z);
+            volcano_cell = (volcano_cell + 1.0f) * 0.5f; // Convert to 0-1
+            
+            // Only place volcanoes where cellular noise is very low (cell centers)
+            if (volcano_cell < 0.2f) {
+                // Calculate distance from volcano center
+                // Lower cell value = closer to center
+                float distance_factor = 1.0f - (volcano_cell / 0.2f);
+                
+                // Volcano height: cone shape with steep sides
+                // Prefer higher elevations for volcanoes but can appear anywhere on land
+                float elevation_preference = std::clamp((base_height - 300.0f) / 1500.0f, 0.2f, 1.0f);
+                
+                // Create cone shape: starts high at center, drops off with distance
+                // Make them taller and more prominent
+                float cone_height = distance_factor * distance_factor * distance_factor * 3000.0f; // Up to 3000m tall, steeper sides
+                cone_height *= elevation_preference; 
+                
+                // Add a crater dip at the very center
+                if (distance_factor > 0.85f) {
+                    float crater_factor = (distance_factor - 0.85f) / 0.15f;
+                    cone_height *= 1.0f - crater_factor * 0.4f; // 40% dip for crater
+                }
+                
+                base_height += cone_height;
+            }
+        }
+        
+        return base_height;
+    }
+    
+    bool is_volcano(float longitude, float latitude) const {
+        float base_height = get_terrain_height(longitude, latitude);
+        
+        // No volcanoes in ocean
+        if (base_height <= config.sea_level) {
+            return false;
+        }
+        
+        float x, y, z;
+        geo_to_world(longitude, latitude, x, y, z);
+        
+        // Check volcano noise
+        float volcano_cell = volcano_noise.GetNoise(x, y, z);
+        volcano_cell = (volcano_cell + 1.0f) * 0.5f;
+        
+        // Location is a volcano if within the cone radius
+        return volcano_cell < 0.2f;
     }
     
     float get_moisture(float longitude, float latitude) const {
@@ -539,6 +600,10 @@ float World::get_river_width(float longitude, float latitude) const {
 
 float World::get_flow_accumulation(float longitude, float latitude) const {
     return pimpl_->get_flow_accumulation(longitude, latitude);
+}
+
+bool World::is_volcano(float longitude, float latitude) const {
+    return pimpl_->is_volcano(longitude, latitude);
 }
 
 void World::set_config(const WorldConfig& config) {

@@ -582,6 +582,13 @@ void render_info_panel(SDL_Renderer* renderer, const World& world,
             float river_width = world.get_river_width(lon, lat);
             snprintf(buffer, sizeof(buffer), "River Width: %.0f m", river_width);
             text_renderer->draw_text(renderer, buffer, 20, text_y, SDL_Color{100, 150, 255, 255});
+            text_y += 20;
+        }
+        
+        // Volcano info
+        if (world.is_volcano(lon, lat)) {
+            snprintf(buffer, sizeof(buffer), "VOLCANO");
+            text_renderer->draw_text(renderer, buffer, 20, text_y, SDL_Color{255, 100, 50, 255});
         }
     } else
 #endif
@@ -830,9 +837,13 @@ void run_sdl_demo(World& world) {
         SDL_Delay(16); // ~60 FPS
     }
     
+    std::cout << "Shutting down...\n" << std::flush;
+    
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
+    
+    std::cout << "Shutdown complete.\n" << std::flush;
 }
 
 #endif // USE_SDL2

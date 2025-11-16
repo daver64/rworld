@@ -248,6 +248,18 @@ public:
     float get_flow_accumulation(float longitude, float latitude) const;
     
     /**
+     * Check if there is a volcano at this location
+     * 
+     * Volcanoes are cone-shaped features scattered across the terrain,
+     * more common at higher elevations.
+     * 
+     * @param longitude Longitude in degrees (-180 to 180)
+     * @param latitude Latitude in degrees (-90 to 90)
+     * @return true if location is part of a volcano
+     */
+    bool is_volcano(float longitude, float latitude) const;
+    
+    /**
      * Update the world configuration
      * This will reset internal noise generators
      */
