@@ -1,5 +1,5 @@
 #define _RWORLD_IMPLEMENTATION
-#include "rworld/world.h"
+#include "rworld.h"
 #include <iostream>
 #include <iomanip>
 #include <vector>
