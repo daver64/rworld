@@ -1,3 +1,4 @@
+#define _RWORLD_IMPLEMENTATION
 #include "rworld/world.h"
 #include <iostream>
 #include <iomanip>

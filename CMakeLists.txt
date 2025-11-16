@@ -5,26 +5,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Library
-add_library(rworld
-    src/world.cpp
-)
+# Header-only library
+add_library(rworld INTERFACE)
 
-target_include_directories(rworld PUBLIC
+target_include_directories(rworld INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party>
     $<INSTALL_INTERFACE:include>
 )
-
-target_include_directories(rworld PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party
-)
-
-# Compiler warnings
-if(MSVC)
-    target_compile_options(rworld PRIVATE /W4)
-else()
-    target_compile_options(rworld PRIVATE -Wall -Wextra -Wpedantic)
-endif()
 
 # Find SDL2 and SDL2_ttf
 find_package(SDL2 QUIET)

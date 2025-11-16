@@ -1,6 +1,6 @@
 # RWorld - Living Active World Library
 
-A C++ library for procedural generation of living world environments with environmental parameters including terrain, biomes, temperature, precipitation, and atmospheric conditions.
+A header-only C++ library for procedural generation of living world environments with environmental parameters including terrain, biomes, temperature, precipitation, and atmospheric conditions.
 
 ## Features
 
@@ -17,6 +17,7 @@ A C++ library for procedural generation of living world environments with enviro
 - **Soil System**: 8 soil types with fertility, pH, and organic matter content
 - **Resource Distribution**: Coal, iron ore, and oil deposits with geological realism
 - **Deterministic Generation**: Same seed produces identical worlds
+- **Header-Only Library**: Easy integration - just include the header, no linking required
 - **Clean API**: Simple coordinate-based queries (longitude, latitude, altitude, time)
 - **Batch Query API**: High-performance bulk queries (10-100x faster for region generation)
 - **Interactive Visualization**: SDL2-based graphical demo with 13 display modes
@@ -65,18 +66,20 @@ The demo application includes an interactive graphical interface when built with
 
 ## Quick Start
 
-### Building
+### Building the Demo
 
 ```bash
 # Install SDL2 for graphical visualization (optional but recommended)
 sudo apt-get install libsdl2-dev libsdl2-ttf-dev  # Ubuntu/Debian
 # or: brew install sdl2 sdl2_ttf                  # macOS
 
-# Build the library
+# Build the demo application
 mkdir build && cd build
 cmake ..
 cmake --build .
 ```
+
+**Note**: The library itself is header-only and requires no compilation. The build step above is only for the demo application.
 
 ### Running the Demo
 
@@ -94,7 +97,10 @@ The demo includes:
 ### Basic World Query
 
 ```cpp
+// Define this in exactly ONE .cpp file before including the header
+#define _RWORLD_IMPLEMENTATION
 #include "rworld/world.h"
+
 #include <iostream>
 
 int main() {
@@ -674,38 +680,56 @@ continental.world_scale = 2.0f;
 
 - **FastNoiseLite**: Single-header noise library (included in `third_party/`)
 - **C++17** or later
-- **CMake 3.15+**
-- **SDL2** (optional, for graphical visualization)
+- **CMake 3.15+** (only needed to build the demo)
+- **SDL2** (optional, for graphical demo visualization)
   - Ubuntu/Debian: `sudo apt-get install libsdl2-dev`
   - macOS: `brew install sdl2`
-  - The library works without SDL2 (text-mode demo only)
+  - The demo works without SDL2 (text-mode output only)
 - **SDL2_ttf** (optional, for text rendering in demo)
   - Ubuntu/Debian: `sudo apt-get install libsdl2-ttf-dev`
   - macOS: `brew install sdl2_ttf`
   - Without SDL2_ttf, graphical demo shows colored visualizations but no text
 
-## Linking to Your Project
+## Using in Your Project
+
+### Header-Only Usage
+
+RWorld is a header-only library. To use it:
+
+1. **Copy the headers** to your project:
+   - `include/rworld/world.h`
+   - `third_party/FastNoiseLite.h`
+
+2. **In exactly ONE .cpp file**, define the implementation before including:
+   ```cpp
+   #define _RWORLD_IMPLEMENTATION
+   #include "rworld/world.h"
+   ```
+
+3. **In all other files**, just include normally:
+   ```cpp
+   #include "rworld/world.h"
+   ```
 
 ### CMake Integration
 
 ```cmake
-# Add rworld as a subdirectory
-add_subdirectory(path/to/rworld)
+# Add rworld include directory
+target_include_directories(your_target PRIVATE 
+    path/to/rworld/include
+    path/to/rworld/third_party
+)
 
-# Link to your executable
-add_executable(your_app main.cpp)
-target_link_libraries(your_app PRIVATE rworld)
+# That's it! No linking needed for header-only library
 ```
 
 ### Manual Compilation
 
 ```bash
-# Compile the library
-g++ -std=c++17 -c src/world.cpp -Iinclude -Ithird_party -o world.o
-ar rcs librworld.a world.o
+# Simply include the path to rworld headers when compiling
+g++ -std=c++17 your_app.cpp -Ipath/to/rworld/include -Ipath/to/rworld/third_party -o your_app
 
-# Link to your application
-g++ -std=c++17 your_app.cpp -Ipath/to/rworld/include -Lpath/to/rworld -lrworld -o your_app
+# Remember to define _RWORLD_IMPLEMENTATION in exactly one .cpp file
 ```
 
 ## Performance Considerations
@@ -725,7 +749,7 @@ float altitude = world.get_terrain_height(lon, lat, detail_level);
 // Use cached altitude for all subsequent queries
 float temp = world.get_temperature(lon, lat, altitude);
 float precip = world.get_precipitation(lon, lat, altitude);
-float biome = world.get_biome(lon, lat, altitude);
+rworld::BiomeType biome = world.get_biome(lon, lat, altitude);
 // ... rather than recalculating altitude each time
 
 // For time-critical applications, query static values once
