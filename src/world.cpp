@@ -12,6 +12,8 @@ public:
     FastNoiseLite terrain_noise;
     FastNoiseLite moisture_noise;
     FastNoiseLite temperature_variation_noise;
+    FastNoiseLite wind_noise;
+    FastNoiseLite river_noise;
     
     explicit Impl(const WorldConfig& cfg) : config(cfg) {
         initialize_noise_generators();
@@ -38,6 +40,20 @@ public:
         temperature_variation_noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
         temperature_variation_noise.SetFrequency(0.003f * config.world_scale);
         temperature_variation_noise.SetSeed(static_cast<int>(config.seed + 2000));
+        
+        // Wind noise - creates wind patterns
+        wind_noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        wind_noise.SetFractalType(FastNoiseLite::FractalType_FBm);
+        wind_noise.SetFractalOctaves(2);
+        wind_noise.SetFrequency(0.002f * config.world_scale);
+        wind_noise.SetSeed(static_cast<int>(config.seed + 3000));
+        
+        // River noise - adds variation to river placement
+        river_noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        river_noise.SetFractalType(FastNoiseLite::FractalType_FBm);
+        river_noise.SetFractalOctaves(3);
+        river_noise.SetFrequency(0.004f * config.world_scale);
+        river_noise.SetSeed(static_cast<int>(config.seed + 4000));
     }
     
     // Convert geographic coordinates to world space for noise sampling
@@ -191,6 +207,187 @@ public:
         return std::clamp(humidity, 0.0f, 1.0f);
     }
     
+    float get_wind_speed(float longitude, float latitude, float altitude) const {
+        float x, y, z;
+        geo_to_world(longitude, latitude, x, y, z);
+        
+        // Base wind from noise
+        float wind_base = wind_noise.GetNoise(x, y, z);
+        wind_base = (wind_base + 1.0f) * 0.5f; // Convert to 0-1
+        
+        // Global wind patterns based on latitude
+        float abs_lat = std::abs(latitude);
+        float lat_wind = 0.0f;
+        
+        // Trade winds (0-30°), westerlies (30-60°), polar easterlies (60-90°)
+        if (abs_lat < 30.0f) {
+            lat_wind = 5.0f + (30.0f - abs_lat) / 30.0f * 3.0f; // 5-8 m/s
+        } else if (abs_lat < 60.0f) {
+            lat_wind = 7.0f + (abs_lat - 30.0f) / 30.0f * 5.0f; // 7-12 m/s
+        } else {
+            lat_wind = 6.0f + (90.0f - abs_lat) / 30.0f * 2.0f; // 6-8 m/s
+        }
+        
+        // Terrain effect - mountains and elevation reduce wind at surface
+        float terrain_height = get_terrain_height(longitude, latitude);
+        float terrain_factor = 1.0f;
+        if (altitude <= std::max(terrain_height, 0.0f) + 10.0f) {
+            // Near surface, terrain roughness matters
+            if (terrain_height > 1000.0f) {
+                terrain_factor = 0.6f; // Mountains reduce wind
+            } else if (terrain_height > 500.0f) {
+                terrain_factor = 0.8f; // Hills reduce wind somewhat
+            }
+        } else {
+            // Higher altitude = stronger winds
+            terrain_factor = 1.0f + (altitude - terrain_height) / 5000.0f;
+        }
+        
+        // Combine factors
+        float wind_speed = (lat_wind * 0.6f + wind_base * 8.0f * 0.4f) * terrain_factor;
+        
+        return std::clamp(wind_speed, 0.0f, 30.0f);
+    }
+    
+    float get_wind_direction(float longitude, float latitude, float altitude) const {
+        float x, y, z;
+        geo_to_world(longitude, latitude, x, y, z);
+        
+        // Global wind patterns
+        float abs_lat = std::abs(latitude);
+        float base_direction = 0.0f;
+        
+        // Trade winds (easterlies 0-30°), westerlies (30-60°), polar easterlies (60-90°)
+        if (abs_lat < 30.0f) {
+            // Trade winds blow from east to west (270° = westward)
+            base_direction = latitude >= 0.0f ? 240.0f : 120.0f; // NE in north, SE in south
+        } else if (abs_lat < 60.0f) {
+            // Westerlies blow from west to east (90° = eastward)
+            base_direction = latitude >= 0.0f ? 60.0f : 300.0f; // SW in north, NW in south
+        } else {
+            // Polar easterlies
+            base_direction = latitude >= 0.0f ? 120.0f : 240.0f; // NE in north, SE in south
+        }
+        
+        // Add local variation from noise
+        float noise_offset = wind_noise.GetNoise(x * 2.0f, y * 2.0f, z * 2.0f) * 60.0f;
+        base_direction += noise_offset;
+        
+        // Normalize to 0-360
+        while (base_direction < 0.0f) base_direction += 360.0f;
+        while (base_direction >= 360.0f) base_direction -= 360.0f;
+        
+        return base_direction;
+    }
+    
+    // Calculate flow accumulation based on terrain gradient
+    float get_flow_accumulation(float longitude, float latitude) const {
+        float terrain_height = get_terrain_height(longitude, latitude);
+        
+        // No rivers in ocean or underwater
+        if (terrain_height <= config.sea_level) {
+            return 0.0f;
+        }
+        
+        // Sample nearby elevations to estimate gradient and flow direction
+        const float sample_dist = 0.1f; // degrees
+        float h_north = get_terrain_height(longitude, latitude + sample_dist);
+        float h_south = get_terrain_height(longitude, latitude - sample_dist);
+        float h_east = get_terrain_height(longitude + sample_dist, latitude);
+        float h_west = get_terrain_height(longitude - sample_dist, latitude);
+        
+        // Calculate how much this location is a "sink" (lower than surroundings)
+        float avg_neighbor = (h_north + h_south + h_east + h_west) / 4.0f;
+        float height_diff = avg_neighbor - terrain_height;
+        
+        // Positive height_diff means we're in a valley/channel
+        float valley_factor = std::clamp(height_diff / 50.0f, 0.0f, 1.0f);
+        
+        // Calculate gradient magnitude - steeper = more defined channels
+        float grad_ns = std::abs(h_north - h_south) / (2.0f * sample_dist);
+        float grad_ew = std::abs(h_east - h_west) / (2.0f * sample_dist);
+        float gradient = std::sqrt(grad_ns * grad_ns + grad_ew * grad_ew);
+        float gradient_factor = std::clamp(gradient / 500.0f, 0.2f, 1.5f);
+        
+        // Get precipitation - more water = more flow
+        float altitude = std::max(terrain_height, 0.0f);
+        float precip = get_precipitation(longitude, latitude, altitude);
+        float precip_factor = std::clamp(precip / 1500.0f, 0.1f, 1.5f);
+        
+        // Add noise variation for natural-looking river networks
+        float x, y, z;
+        geo_to_world(longitude, latitude, x, y, z);
+        float noise = river_noise.GetNoise(x, y, z);
+        noise = (noise + 1.0f) * 0.5f; // 0-1
+        
+        // Boost noise influence to create more rivers
+        float noise_factor = noise * noise; // Square for more variation
+        
+        // Combine factors: valleys + precipitation + noise + gradient
+        float flow = valley_factor * 0.4f + precip_factor * 0.25f + noise_factor * 0.35f;
+        flow *= gradient_factor;
+        
+        // Elevation influence - rivers more common at mid-elevations
+        if (terrain_height < 100.0f) {
+            flow *= 2.0f; // Near sea level - wide river plains and deltas
+        } else if (terrain_height < 500.0f) {
+            flow *= 1.3f; // Low elevation - good for rivers
+        } else if (terrain_height > 3000.0f) {
+            flow *= 0.4f; // High mountains - fewer/smaller rivers
+        }
+        
+        return std::clamp(flow, 0.0f, 1.0f);
+    }
+    
+    bool is_river(float longitude, float latitude) const {
+        float terrain_height = get_terrain_height(longitude, latitude);
+        
+        // No rivers in ocean
+        if (terrain_height <= config.sea_level) {
+            return false;
+        }
+        
+        float flow = get_flow_accumulation(longitude, latitude);
+        // Lower threshold for river presence to show more rivers
+        return flow > 0.4f;
+    }
+    
+    float get_river_width(float longitude, float latitude) const {
+        float terrain_height = get_terrain_height(longitude, latitude);
+        
+        // No rivers in ocean
+        if (terrain_height <= config.sea_level) {
+            return 0.0f;
+        }
+        
+        float flow = get_flow_accumulation(longitude, latitude);
+        
+        if (flow < 0.4f) {
+            return 0.0f; // No river
+        }
+        
+        // Width increases with flow accumulation
+        float base_width = (flow - 0.4f) / 0.6f; // 0-1 for flow 0.4-1.0
+        
+        // Use terrain height for elevation influence (already have it)
+        float altitude = std::max(terrain_height, 0.0f);
+        
+        // Rivers get wider at lower elevations (approaching sea)
+        float elevation_factor = 1.0f;
+        if (terrain_height < 500.0f) {
+            elevation_factor = 2.0f + (500.0f - terrain_height) / 500.0f * 3.0f; // 2-5x wider
+        }
+        
+        // Get precipitation for flow volume
+        float precip = get_precipitation(longitude, latitude, altitude);
+        float precip_factor = 0.5f + std::clamp(precip / 2000.0f, 0.0f, 1.0f) * 0.5f; // 0.5-1.0
+        
+        // Calculate width: 5-200 meters
+        float width = 5.0f + base_width * base_width * 40.0f * elevation_factor * precip_factor;
+        
+        return std::clamp(width, 0.0f, 500.0f);
+    }
+    
     BiomeType classify_biome(float longitude, float latitude, float altitude) const {
         float terrain_height = get_terrain_height(longitude, latitude);
         
@@ -322,6 +519,26 @@ float World::get_air_pressure(float longitude, float latitude, float altitude) c
 
 float World::get_humidity(float longitude, float latitude, float altitude) const {
     return pimpl_->get_humidity(longitude, latitude, altitude);
+}
+
+float World::get_wind_speed(float longitude, float latitude, float altitude) const {
+    return pimpl_->get_wind_speed(longitude, latitude, altitude);
+}
+
+float World::get_wind_direction(float longitude, float latitude, float altitude) const {
+    return pimpl_->get_wind_direction(longitude, latitude, altitude);
+}
+
+bool World::is_river(float longitude, float latitude) const {
+    return pimpl_->is_river(longitude, latitude);
+}
+
+float World::get_river_width(float longitude, float latitude) const {
+    return pimpl_->get_river_width(longitude, latitude);
+}
+
+float World::get_flow_accumulation(float longitude, float latitude) const {
+    return pimpl_->get_flow_accumulation(longitude, latitude);
 }
 
 void World::set_config(const WorldConfig& config) {

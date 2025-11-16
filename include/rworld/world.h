@@ -187,6 +187,67 @@ public:
     float get_humidity(float longitude, float latitude, float altitude) const;
     
     /**
+     * Get wind speed at a location
+     * 
+     * Wind is influenced by pressure gradients, latitude (Coriolis effect),
+     * and terrain features
+     * 
+     * @param longitude Longitude in degrees (-180 to 180)
+     * @param latitude Latitude in degrees (-90 to 90)
+     * @param altitude Altitude in meters
+     * @return Wind speed in meters per second
+     */
+    float get_wind_speed(float longitude, float latitude, float altitude) const;
+    
+    /**
+     * Get wind direction at a location
+     * 
+     * Direction in degrees where 0° is North, 90° is East, 180° is South, 270° is West
+     * 
+     * @param longitude Longitude in degrees (-180 to 180)
+     * @param latitude Latitude in degrees (-90 to 90)
+     * @param altitude Altitude in meters
+     * @return Wind direction in degrees (0-360)
+     */
+    float get_wind_direction(float longitude, float latitude, float altitude) const;
+    
+    /**
+     * Check if there is a river at this location
+     * 
+     * Rivers flow from high elevation to low, following terrain gradients.
+     * More common in areas with high precipitation.
+     * 
+     * @param longitude Longitude in degrees (-180 to 180)
+     * @param latitude Latitude in degrees (-90 to 90)
+     * @return true if location has a river
+     */
+    bool is_river(float longitude, float latitude) const;
+    
+    /**
+     * Get river width at a location
+     * 
+     * Width increases with upstream drainage area and precipitation.
+     * Returns 0 if no river present.
+     * 
+     * @param longitude Longitude in degrees (-180 to 180)
+     * @param latitude Latitude in degrees (-90 to 90)
+     * @return River width in meters (0 if no river)
+     */
+    float get_river_width(float longitude, float latitude) const;
+    
+    /**
+     * Get flow accumulation at a location
+     * 
+     * Represents the upstream drainage area contributing water to this point.
+     * Higher values indicate major river channels.
+     * 
+     * @param longitude Longitude in degrees (-180 to 180)
+     * @param latitude Latitude in degrees (-90 to 90)
+     * @return Flow accumulation value (0-1, normalized)
+     */
+    float get_flow_accumulation(float longitude, float latitude) const;
+    
+    /**
      * Update the world configuration
      * This will reset internal noise generators
      */

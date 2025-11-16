@@ -233,7 +233,8 @@ enum class DisplayMode {
     ELEVATION,
     TEMPERATURE,
     PRECIPITATION,
-    CLOUDS
+    CLOUDS,
+    RIVERS
 };
 
 #ifdef USE_SDL2_TTF
@@ -458,6 +459,19 @@ void render_world_map(SDL_Renderer* renderer, const World& world,
                     color = get_biome_color(biome);
                     break;
                 }
+                case DisplayMode::RIVERS: {
+                    // Show elevation with rivers highlighted
+                    float height = world.get_terrain_height(lon, lat, view.zoom);
+                    color = get_height_color(height);
+                    
+                    // Overlay rivers in blue
+                    if (world.is_river(lon, lat)) {
+                        float flow = world.get_flow_accumulation(lon, lat);
+                        uint8_t blue_intensity = static_cast<uint8_t>(100 + flow * 155);
+                        color = {0, 100, blue_intensity};
+                    }
+                    break;
+                }
             }
             
             SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
@@ -489,7 +503,7 @@ void render_info_panel(SDL_Renderer* renderer, const World& world,
     BiomeType biome = world.get_biome(lon, lat, altitude);
     
     // Draw semi-transparent info panel
-    SDL_Rect panel = {10, 10, 320, 200};
+    SDL_Rect panel = {10, 10, 320, 250};
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 200);
     SDL_RenderFillRect(renderer, &panel);
@@ -540,6 +554,35 @@ void render_info_panel(SDL_Renderer* renderer, const World& world,
         float humidity = world.get_humidity(lon, lat, altitude);
         snprintf(buffer, sizeof(buffer), "Humidity: %.0f%%", humidity * 100);
         text_renderer->draw_text(renderer, buffer, 20, text_y, gray);
+        text_y += 20;
+        
+        // Wind speed
+        float wind_speed = world.get_wind_speed(lon, lat, altitude);
+        snprintf(buffer, sizeof(buffer), "Wind Speed: %.1f m/s", wind_speed);
+        text_renderer->draw_text(renderer, buffer, 20, text_y, gray);
+        text_y += 20;
+        
+        // Wind direction
+        float wind_dir = world.get_wind_direction(lon, lat, altitude);
+        const char* wind_compass = "";
+        if (wind_dir >= 337.5f || wind_dir < 22.5f) wind_compass = "N";
+        else if (wind_dir < 67.5f) wind_compass = "NE";
+        else if (wind_dir < 112.5f) wind_compass = "E";
+        else if (wind_dir < 157.5f) wind_compass = "SE";
+        else if (wind_dir < 202.5f) wind_compass = "S";
+        else if (wind_dir < 247.5f) wind_compass = "SW";
+        else if (wind_dir < 292.5f) wind_compass = "W";
+        else wind_compass = "NW";
+        snprintf(buffer, sizeof(buffer), "Wind Dir: %.0f%c (%s)", wind_dir, 176, wind_compass);
+        text_renderer->draw_text(renderer, buffer, 20, text_y, gray);
+        text_y += 20;
+        
+        // River info
+        if (world.is_river(lon, lat)) {
+            float river_width = world.get_river_width(lon, lat);
+            snprintf(buffer, sizeof(buffer), "River Width: %.0f m", river_width);
+            text_renderer->draw_text(renderer, buffer, 20, text_y, SDL_Color{100, 150, 255, 255});
+        }
     } else
 #endif
     {
@@ -591,6 +634,7 @@ void render_info_panel(SDL_Renderer* renderer, const World& world,
             case DisplayMode::TEMPERATURE: mode_text = "Mode: Temperature (3)"; break;
             case DisplayMode::PRECIPITATION: mode_text = "Mode: Precipitation (4)"; break;
             case DisplayMode::CLOUDS: mode_text = "Mode: Clouds (5)"; break;
+            case DisplayMode::RIVERS: mode_text = "Mode: Rivers (6)"; break;
         }
         text_renderer->draw_text(renderer, mode_text, 20, map_height - 33, white);
     }
@@ -645,6 +689,7 @@ void run_sdl_demo(World& world) {
     std::cout << "  3 - Show Temperature\n";
     std::cout << "  4 - Show Precipitation\n";
     std::cout << "  5 - Show Clouds\n";
+    std::cout << "  6 - Show Rivers\n";
     std::cout << "  R - Regenerate world (new seed)\n";
     std::cout << "  Mouse Wheel - Zoom in/out at cursor position\n";
     std::cout << "  ESC/Q - Quit\n";
@@ -695,6 +740,11 @@ void run_sdl_demo(World& world) {
                         current_mode = DisplayMode::CLOUDS;
                         need_redraw = true;
                         std::cout << "Display mode: Clouds\n";
+                        break;
+                    case SDLK_6:
+                        current_mode = DisplayMode::RIVERS;
+                        need_redraw = true;
+                        std::cout << "Display mode: Rivers\n";
                         break;
                     case SDLK_r:
                         config.seed = static_cast<uint64_t>(SDL_GetTicks64());
