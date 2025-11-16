@@ -11,7 +11,7 @@
 #ifdef USE_SDL2_TTF
 #include <SDL2/SDL_ttf.h>
 #endif
-#include "../third_party/FastNoiseLite.h"
+#include "FastNoiseLite.h"
 #endif
 
 using namespace rworld;
