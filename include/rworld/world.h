@@ -139,9 +139,10 @@ public:
      * 
      * @param longitude Longitude in degrees (-180 to 180)
      * @param latitude Latitude in degrees (-90 to 90)
+     * @param detail_level Detail multiplier for terrain resolution (1.0 = normal, higher = finer detail)
      * @return Height in meters above sea level (negative for underwater)
      */
-    float get_terrain_height(float longitude, float latitude) const;
+    float get_terrain_height(float longitude, float latitude, float detail_level = 1.0f) const;
     
     /**
      * Get precipitation level at a location

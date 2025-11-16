@@ -335,26 +335,30 @@ void render_world_map(SDL_Renderer* renderer, const World& world,
             
             switch (mode) {
                 case DisplayMode::BIOMES: {
-                    float terrain_height = world.get_terrain_height(lon, lat);
+                    // Biomes use base terrain (detail_level = 1.0) so they don't change with zoom
+                    float terrain_height = world.get_terrain_height(lon, lat, 1.0f);
                     float altitude = std::max(terrain_height, 0.0f);
                     BiomeType biome = world.get_biome(lon, lat, altitude);
                     color = get_biome_color(biome);
                     break;
                 }
                 case DisplayMode::ELEVATION: {
-                    float height = world.get_terrain_height(lon, lat);
+                    // Elevation uses detailed terrain that responds to zoom
+                    float height = world.get_terrain_height(lon, lat, view.zoom);
                     color = get_height_color(height);
                     break;
                 }
                 case DisplayMode::TEMPERATURE: {
-                    float terrain_height = world.get_terrain_height(lon, lat);
+                    // Temperature uses base terrain so it stays consistent
+                    float terrain_height = world.get_terrain_height(lon, lat, 1.0f);
                     float altitude = std::max(terrain_height, 0.0f);
                     float temp = world.get_temperature(lon, lat, altitude);
                     color = get_temperature_color(temp);
                     break;
                 }
                 case DisplayMode::PRECIPITATION: {
-                    float terrain_height = world.get_terrain_height(lon, lat);
+                    // Precipitation uses base terrain so it stays consistent
+                    float terrain_height = world.get_terrain_height(lon, lat, 1.0f);
                     float altitude = std::max(terrain_height, 0.0f);
                     float precip = world.get_precipitation(lon, lat, altitude);
                     color = get_precipitation_color(precip);

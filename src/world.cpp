@@ -53,12 +53,33 @@ public:
         z = r * std::sin(lat_rad);
     }
     
-    float get_terrain_height(float longitude, float latitude) const {
+    float get_terrain_height(float longitude, float latitude, float detail_level = 1.0f) const {
         float x, y, z;
         geo_to_world(longitude, latitude, x, y, z);
         
         // Get base terrain noise (-1 to 1)
         float noise_value = terrain_noise.GetNoise(x, y, z);
+        
+        // Add finer detail layers when detail_level > 1.0
+        if (detail_level > 1.0f) {
+            // Add progressively finer octaves of detail
+            float detail_contribution = 0.0f;
+            float detail_amplitude = 0.3f; // Strength of detail layers
+            float detail_frequency = 2.0f;
+            
+            // Add up to 3 detail octaves based on zoom level
+            int detail_octaves = std::min(3, static_cast<int>(std::log2(detail_level)));
+            
+            for (int i = 0; i < detail_octaves; ++i) {
+                float freq = detail_frequency * std::pow(2.0f, i);
+                detail_contribution += terrain_noise.GetNoise(x * freq, y * freq, z * freq) * detail_amplitude;
+                detail_amplitude *= 0.5f; // Each octave contributes less
+            }
+            
+            // Blend detail based on zoom level
+            float detail_blend = std::min(1.0f, (detail_level - 1.0f) / 4.0f);
+            noise_value = noise_value * (1.0f - detail_blend * 0.3f) + detail_contribution * detail_blend;
+        }
         
         // Apply power curve to create more ocean and distinct continents
         // Values below 0 are ocean, above 0 are land
@@ -269,8 +290,8 @@ float World::get_temperature(float longitude, float latitude, float altitude) co
     return pimpl_->get_temperature(longitude, latitude, altitude);
 }
 
-float World::get_terrain_height(float longitude, float latitude) const {
-    return pimpl_->get_terrain_height(longitude, latitude);
+float World::get_terrain_height(float longitude, float latitude, float detail_level) const {
+    return pimpl_->get_terrain_height(longitude, latitude, detail_level);
 }
 
 float World::get_precipitation(float longitude, float latitude, float altitude) const {
